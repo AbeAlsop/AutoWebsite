@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <header class="toolbar">
+        <h1>History</h1>
+        <a href="/dashboard">Dashboard</a>
+    </header>
+
+    {% if commits %}
+        <ol>
+            {% for commit in commits %}
+                <li>{{ commit }}</li>
+            {% endfor %}
+        </ol>
+    {% else %}
+        <p>No commits are available yet.</p>
+    {% endif %}
+
+    <form action="/rollback" method="post" class="stack">
+        <label>
+            Commit hash
+            <input type="text" name="commit" required>
+        </label>
+        <button type="submit">Rollback</button>
+    </form>
+</section>
+{% endblock %}
+
