@@ -3,6 +3,9 @@
 {% block content %}
 <section class="panel">
     <h1>{{ app_name }}</h1>
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
     <form action="/login" method="post">
         <label>
             Username
@@ -16,4 +19,3 @@
     </form>
 </section>
 {% endblock %}
-

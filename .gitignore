@@ -203,6 +203,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Local OS and editor metadata
+.DS_Store
+.idea/
+
 # Ruff stuff:
 .ruff_cache/
 

@@ -67,3 +67,12 @@ a {
     color: #2457d6;
 }
 
+.error {
+    color: #a32020;
+    font-weight: 700;
+}
+
+.muted {
+    color: #5d6675;
+    margin: 0;
+}
