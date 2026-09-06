@@ -3,34 +3,68 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
 from .csrf import create_csrf_token, validate_csrf_token
+from .repository import Admin, RepositoryStore, Website
+from .site import SingleSitePublisher
 
 app = FastAPI(title=settings.app_name)
+repository_store = RepositoryStore(settings.database_path)
 
 templates = Jinja2Templates(directory=str(settings.templates_dir))
 
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 
 
-def get_session_username(request: Request) -> str | None:
+@app.on_event("startup")
+async def initialize_repository_store() -> None:
+    repository_store.initialize(
+        bootstrap_username=settings.admin_username,
+        bootstrap_password_hash=settings.admin_password_hash,
+        bootstrap_website_name=settings.default_website_name,
+        bootstrap_github_repo=settings.default_github_repo,
+        bootstrap_working_directory=settings.default_website_directory,
+        bootstrap_github_token_ref=settings.default_github_token_ref,
+    )
+    website = repository_store.get_active_website()
+    if website is None:
+        raise RuntimeError("No active website is configured.")
+    SingleSitePublisher(
+        repositories_root=settings.repositories_root,
+        published_root=settings.published_root,
+        source_directory=website.working_directory,
+        starter_site_directory=settings.starter_site_dir,
+    ).initialize()
+
+
+def get_session_admin(request: Request) -> Admin | None:
     token = request.cookies.get(settings.session_cookie_name)
     session = read_session_token(token, settings.session_secret)
     if session is None:
         return None
-    return session.username
+    admin = repository_store.get_admin(session.username)
+    if admin is None or (session.website_id is not None and session.website_id != admin.website_id):
+        return None
+    return admin
 
 
-def require_admin(request: Request) -> str:
-    username = get_session_username(request)
-    if username != settings.admin_username:
+def require_admin(request: Request) -> Admin:
+    admin = get_session_admin(request)
+    if admin is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    return username
+    return admin
+
+
+def get_authorized_website(admin: Admin) -> Website:
+    website = repository_store.get_website_for_admin(admin.username, admin.website_id)
+    if website is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Website access denied")
+    return website
 
 
 def require_csrf(request: Request, csrf_token: str | None) -> None:
@@ -74,14 +108,9 @@ def render_template_with_csrf(
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
-async def home() -> FileResponse:
-    return FileResponse(settings.public_index)
-
-
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_login(request: Request) -> Response:
-    if get_session_username(request) == settings.admin_username:
+    if get_session_admin(request) is not None:
         return RedirectResponse(url="/dashboard", status_code=303)
 
     return render_template_with_csrf(
@@ -99,7 +128,8 @@ async def login(
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> Response:
     require_csrf(request, csrf_token)
-    if username != settings.admin_username or not verify_password(password, settings.admin_password_hash):
+    admin = repository_store.get_admin(username)
+    if admin is None or not verify_password(password, admin.password_hash):
         return render_template_with_csrf(
             request,
             "login.html",
@@ -111,6 +141,7 @@ async def login(
         username=username,
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,
+        website_id=admin.website_id,
     )
     response = RedirectResponse(url="/dashboard", status_code=303)
     response.set_cookie(
@@ -146,11 +177,12 @@ async def logout(request: Request, csrf_token: Annotated[str | None, Form()] = N
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    username = require_admin(request)
+    admin = require_admin(request)
+    website = get_authorized_website(admin)
     return render_template_with_csrf(
         request,
         "dashboard.html",
-        {"app_name": settings.app_name, "username": username},
+        {"app_name": settings.app_name, "username": admin.username, "website": website},
     )
 
 
@@ -160,13 +192,16 @@ async def submit_prompt(
     prompt: Annotated[str, Form()],
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    require_admin(request)
+    admin = require_admin(request)
     require_csrf(request, csrf_token)
+    website = get_authorized_website(admin)
     # Phase 9 connects this endpoint to the coding agent.
     return JSONResponse(
         {
             "status": "accepted",
             "prompt": prompt,
+            "website_id": website.id,
+            "website_name": website.name,
             "message": "Prompt received. Agent execution is not enabled yet.",
         },
         status_code=202,
@@ -179,8 +214,9 @@ async def upload_file(
     file: Annotated[UploadFile, File()],
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    require_admin(request)
+    admin = require_admin(request)
     require_csrf(request, csrf_token)
+    website = get_authorized_website(admin)
     # Phase 7 persists uploads and records metadata.
     contents = await file.read()
     return JSONResponse(
@@ -189,6 +225,7 @@ async def upload_file(
             "filename": file.filename,
             "content_type": file.content_type,
             "size": len(contents),
+            "website_id": website.id,
             "message": "Upload received. Persistent storage is not enabled yet.",
         },
         status_code=202,
@@ -197,11 +234,12 @@ async def upload_file(
 
 @app.get("/history", response_class=HTMLResponse)
 async def history(request: Request) -> HTMLResponse:
-    require_admin(request)
+    admin = require_admin(request)
+    website = get_authorized_website(admin)
     return render_template_with_csrf(
         request,
         "history.html",
-        {"commits": []},
+        {"commits": [], "website": website},
     )
 
 
@@ -211,13 +249,15 @@ async def rollback(
     commit: Annotated[str, Form()],
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    require_admin(request)
+    admin = require_admin(request)
     require_csrf(request, csrf_token)
+    website = get_authorized_website(admin)
     # Phase 14 implements rollback behavior.
     return JSONResponse(
         {
             "status": "queued",
             "commit": commit,
+            "website_id": website.id,
             "message": "Rollback endpoint is available; rollback execution is not enabled yet.",
         },
         status_code=202,
@@ -227,3 +267,8 @@ async def rollback(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# This route is deliberately registered last: the public static site is a fallback
+# after all administration and health routes, and is served only from `published/current`.
+app.mount("/", StaticFiles(directory=str(settings.public_site_dir), html=True, check_dir=False), name="public")

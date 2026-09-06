@@ -4,7 +4,7 @@
 <section class="panel">
     <header class="toolbar">
         <h1>{{ app_name }} Dashboard</h1>
-        <p class="muted">Signed in as {{ username }}</p>
+        <p class="muted">Signed in as {{ username }} · Managing {{ website.name }}</p>
         <form action="/logout" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit">Log out</button>

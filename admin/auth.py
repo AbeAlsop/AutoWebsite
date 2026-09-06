@@ -13,6 +13,7 @@ import bcrypt
 @dataclass(frozen=True)
 class Session:
     username: str
+    website_id: int | None
     expires_at: int
 
 
@@ -29,9 +30,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_session_token(username: str, secret: str, max_age_seconds: int) -> str:
+def create_session_token(
+    username: str, secret: str, max_age_seconds: int, website_id: int | None = None
+) -> str:
     expires_at = int(time.time()) + max_age_seconds
-    payload = {"username": username, "expires_at": expires_at}
+    payload = {"username": username, "website_id": website_id, "expires_at": expires_at}
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     encoded_payload = _urlsafe_encode(payload_bytes)
     signature = _sign(encoded_payload, secret)
@@ -51,6 +54,9 @@ def read_session_token(token: str | None, secret: str) -> Session | None:
         payload_bytes = _urlsafe_decode(encoded_payload)
         payload = json.loads(payload_bytes)
         username = payload["username"]
+        website_id = payload.get("website_id")
+        if website_id is not None:
+            website_id = int(website_id)
         expires_at = int(payload["expires_at"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -58,7 +64,7 @@ def read_session_token(token: str | None, secret: str) -> Session | None:
     if expires_at <= int(time.time()):
         return None
 
-    return Session(username=username, expires_at=expires_at)
+    return Session(username=username, website_id=website_id, expires_at=expires_at)
 
 
 def _sign(encoded_payload: str, secret: str) -> str:
