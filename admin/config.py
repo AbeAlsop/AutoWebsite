@@ -15,6 +15,9 @@ class Settings:
     session_secret: str = os.getenv("AUTOWEBSITE_SESSION_SECRET", "change-this-session-secret")
     session_cookie_name: str = "autowebsite_session"
     session_max_age_seconds: int = 8 * 60 * 60
+    csrf_cookie_name: str = "autowebsite_csrf"
+    csrf_max_age_seconds: int = 8 * 60 * 60
+    secure_cookies: bool = os.getenv("AUTOWEBSITE_SECURE_COOKIES", "true").lower() != "false"
 
     @property
     def templates_dir(self) -> Path:

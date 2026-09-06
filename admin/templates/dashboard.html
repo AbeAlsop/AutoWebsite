@@ -6,11 +6,13 @@
         <h1>{{ app_name }} Dashboard</h1>
         <p class="muted">Signed in as {{ username }}</p>
         <form action="/logout" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit">Log out</button>
         </form>
     </header>
 
     <form action="/prompt" method="post" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>
             Prompt
             <textarea name="prompt" rows="8" required></textarea>
@@ -19,6 +21,7 @@
     </form>
 
     <form action="/upload" method="post" enctype="multipart/form-data" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>
             Upload
             <input type="file" name="file" required>

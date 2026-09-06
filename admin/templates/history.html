@@ -18,6 +18,7 @@
     {% endif %}
 
     <form action="/rollback" method="post" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>
             Commit hash
             <input type="text" name="commit" required>
@@ -26,4 +27,3 @@
     </form>
 </section>
 {% endblock %}
-

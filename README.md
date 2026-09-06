@@ -16,6 +16,7 @@ Phase 3 authentication expects credentials from environment variables:
 export AUTOWEBSITE_ADMIN_USERNAME="admin"
 export AUTOWEBSITE_ADMIN_PASSWORD_HASH="<bcrypt hash>"
 export AUTOWEBSITE_SESSION_SECRET="<long random secret>"
+export AUTOWEBSITE_SECURE_COOKIES="true"
 ```
 
 Generate a bcrypt hash without storing the plaintext password:
@@ -23,3 +24,5 @@ Generate a bcrypt hash without storing the plaintext password:
 ```bash
 .venv/bin/python -c "from admin.auth import hash_password; print(hash_password('your password'))"
 ```
+
+For local HTTP-only testing, set `AUTOWEBSITE_SECURE_COOKIES=false`. Keep secure cookies enabled in production.
