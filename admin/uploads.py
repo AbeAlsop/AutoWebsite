@@ -8,7 +8,6 @@ import struct
 import subprocess
 import unicodedata
 import uuid
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,10 +75,8 @@ class UploadManager:
             mime_type = _sniff_mime_type(sniffed)
             if mime_type is None:
                 raise UploadRejected("The uploaded content type is not allowed.")
-            if mime_type == "application/zip":
-                _inspect_zip(quarantined_file, self.settings)
             width, height = _image_dimensions(mime_type, sniffed)
-            self._scan_for_malware(quarantined_file)
+            scan_status = self._scan_status(quarantined_file)
 
             os.replace(quarantined_file, content_file)
             self.store.complete_upload(
@@ -90,6 +87,7 @@ class UploadManager:
                 size=size,
                 width=width,
                 height=height,
+                scan_status=scan_status,
             )
             approved = self.store.get_upload(upload_id, website_id)
             if approved is None:
@@ -97,7 +95,7 @@ class UploadManager:
             self._write_manifest(approved)
             self._write_gallery_manifest(website_id)
             return StoredUpload(approved)
-        except (UploadRejected, OSError, zipfile.BadZipFile) as error:
+        except (UploadRejected, OSError) as error:
             if not _can_rescan(str(error)):
                 quarantined_file.unlink(missing_ok=True)
             scan_status = "rejected" if isinstance(error, UploadRejected) else "error"
@@ -120,10 +118,8 @@ class UploadManager:
         mime_type = _sniff_mime_type(payload[:_SNIFF_BYTES])
         if mime_type is None:
             raise UploadRejected("The uploaded content type is not allowed.")
-        if mime_type == "application/zip":
-            _inspect_zip(quarantined_file, self.settings)
         width, height = _image_dimensions(mime_type, payload[:_SNIFF_BYTES])
-        self._scan_for_malware(quarantined_file)
+        scan_status = self._scan_status(quarantined_file)
         os.replace(quarantined_file, upload.storage_path)
         self.store.complete_upload(
             upload_id,
@@ -133,6 +129,7 @@ class UploadManager:
             size=len(payload),
             width=width,
             height=height,
+            scan_status=scan_status,
         )
         approved = self.store.get_upload(upload_id, website_id)
         if approved is None:
@@ -166,6 +163,12 @@ class UploadManager:
         if size == 0:
             raise UploadRejected("Empty uploads are not allowed.")
         return size, digest.hexdigest(), bytes(sniffed)
+
+    def _scan_status(self, path: Path) -> str:
+        if not self.settings.upload_malware_scan_enabled:
+            return "disabled"
+        self._scan_for_malware(path)
+        return "clean"
 
     def _scan_for_malware(self, path: Path) -> None:
         command = shlex.split(self.settings.upload_malware_scan_command)
@@ -238,10 +241,6 @@ def _sniff_mime_type(data: bytes) -> str | None:
         return "image/jpeg"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    if data.startswith(b"%PDF-"):
-        return "application/pdf"
-    if data.startswith(b"PK\x03\x04"):
-        return "application/zip"
     return None
 
 
@@ -299,23 +298,6 @@ def _webp_dimensions(data: bytes) -> tuple[int | None, int | None]:
         height = 1 + (second >> 6) + (third << 2) + ((fourth & 0x0F) << 10)
         return width, height
     return None, None
-
-
-def _inspect_zip(path: Path, settings: Settings) -> None:
-    with zipfile.ZipFile(path) as archive:
-        infos = archive.infolist()
-        if len(infos) > settings.max_zip_entries:
-            raise UploadRejected(f"ZIP contains more than {settings.max_zip_entries} entries.")
-        total_size = 0
-        for info in infos:
-            name = info.filename.replace("\\", "/")
-            if name.startswith("/") or ".." in Path(name).parts or info.flag_bits & 0x1:
-                raise UploadRejected("ZIP contains an unsafe or encrypted entry.")
-            total_size += info.file_size
-            if total_size > settings.max_zip_uncompressed_bytes:
-                raise UploadRejected("ZIP exceeds the uncompressed-size limit.")
-            if info.compress_size and info.file_size / info.compress_size > 200:
-                raise UploadRejected("ZIP compression ratio is too high.")
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:

@@ -28,10 +28,7 @@ class Settings:
     max_agent_output_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_AGENT_OUTPUT_BYTES", "1048576"))
     max_upload_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     max_upload_count: int = int(os.getenv("AUTOWEBSITE_MAX_UPLOAD_COUNT", "100"))
-    max_zip_entries: int = int(os.getenv("AUTOWEBSITE_MAX_ZIP_ENTRIES", "100"))
-    max_zip_uncompressed_bytes: int = int(
-        os.getenv("AUTOWEBSITE_MAX_ZIP_UNCOMPRESSED_BYTES", str(50 * 1024 * 1024))
-    )
+    upload_malware_scan_enabled: bool = os.getenv("AUTOWEBSITE_UPLOAD_MALWARE_SCAN_ENABLED", "true").lower() == "true"
     upload_malware_scan_command: str = os.getenv("AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND", "clamscan")
 
     @property

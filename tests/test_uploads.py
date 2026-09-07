@@ -69,6 +69,18 @@ def test_invalid_upload_is_rejected_and_payload_is_removed(tmp_path: Path):
     assert list((configured.uploads_root / "active-site" / rejected[0].id).glob("quarantine.bin")) == []
 
 
+def test_allowed_image_records_when_malware_scanning_is_disabled(tmp_path: Path):
+    store, website_id = _store(tmp_path)
+    configured = replace(settings, project_root=tmp_path, upload_malware_scan_enabled=False)
+    manager = UploadManager(store, configured)
+    image = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (1).to_bytes(4, "big") * 2
+
+    stored = asyncio.run(manager.store_upload(website_id, _upload("image.png", image)))
+
+    assert stored.upload.status == "approved"
+    assert stored.upload.scan_status == "disabled"
+
+
 def test_upload_records_full_storage_path(tmp_path: Path):
     store, website_id = _store(tmp_path)
     configured = replace(settings, project_root=tmp_path)

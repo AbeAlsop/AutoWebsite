@@ -9,7 +9,7 @@ Create a self-editing website platform where:
 - The public website consists entirely of static HTML/CSS/JavaScript served by AutoWebsite; the administration application is available under `/admin`.
 - The website source is stored in a GitHub repository.
 - A Python administration application allows authenticated administrators to modify the website using natural language.
-- The administrator can upload approved files (such as images, PDFs, and ZIP files) that become part of the repository.
+- The administrator can upload approved images that become part of the repository.
 - An AI coding agent edits the repository.
 - Every modification is committed to Git.
 - Any previous published version can be restored.
@@ -317,10 +317,9 @@ The administrator uploads files for the active site. Store each upload under a g
 ID such as `uploads/active-site/<upload_id>/`; retain the original filename only as
 display metadata. Do not accept an upload path from the browser.
 
-Enforce file-type allowlists, content sniffing, file size/count quotas, filename
-normalization, and malware scanning. An upload remains quarantined until it passes
-those checks. Non-executable archives such as ZIP files require explicit inspection
-and extraction limits before use.
+Enforce a JPEG/PNG/WebP/GIF allowlist, content sniffing, file size/count quotas,
+filename normalization, and malware scanning. An upload remains quarantined until it
+passes those checks.
 
 The administrator can later instruct the coding agent:
 
@@ -538,4 +537,3 @@ The implementation is complete when:
 - Commit history is viewable.
 - Any previous version can be restored.
 - Security controls prevent unauthorized repository access.
-

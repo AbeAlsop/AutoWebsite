@@ -290,16 +290,17 @@ class RepositoryStore:
         size: int,
         width: int | None,
         height: int | None,
+        scan_status: str = "clean",
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE uploads
                 SET checksum = ?, mime_type = ?, size = ?, width = ?, height = ?,
-                    scan_status = 'clean', status = 'approved', error = NULL
+                    scan_status = ?, status = 'approved', error = NULL
                 WHERE id = ? AND website_id = ? AND status IN ('quarantined', 'rejected')
                 """,
-                (checksum, mime_type, size, width, height, upload_id, website_id),
+                (checksum, mime_type, size, width, height, scan_status, upload_id, website_id),
             )
 
     def reject_upload(self, upload_id: str, website_id: int, error: str, scan_status: str = "rejected") -> None:

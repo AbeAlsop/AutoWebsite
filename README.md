@@ -51,14 +51,15 @@ source directory and publishes an initial immutable release. It serves that rele
 
 Uploads are stored outside the site repository under a generated ID, never under a
 browser-provided filename or path. AutoWebsite streams each file into quarantine,
-enforces the configured size/count/type limits, sniffs the content type, inspects ZIP
-archives, and requires a passing malware scan before marking it approved. Configure a
-scanner available on the server; the default command is `clamscan` and uploads fail
-closed if it is unavailable:
+enforces the configured size/count/type limits, accepts only JPEG, PNG, WebP, and GIF
+content signatures, and requires a passing malware scan before marking it approved.
+Configure a scanner available on the server; scanning is enabled by default and uploads
+fail closed if it is unavailable:
 
 ```bash
 export AUTOWEBSITE_UPLOADS_ROOT="/srv/autowebsites-uploads"
 export AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND="clamscan"
+export AUTOWEBSITE_UPLOAD_MALWARE_SCAN_ENABLED="true"
 export AUTOWEBSITE_MAX_UPLOAD_BYTES="10485760"
 ```
 
@@ -67,6 +68,10 @@ images, dimensions plus the site-level `gallery.json` manifest. The agent must r
 only approved job-specific copies and metadata, not this shared upload store.
 The dashboard also accepts an optional attachment with a prompt; after it passes the
 same checks, AutoWebsite automatically associates it with that new job.
+
+For a trusted local proof of concept only, set
+`AUTOWEBSITE_UPLOAD_MALWARE_SCAN_ENABLED=false` to accept allowed image uploads without
+a malware scan. Do not use that setting on an Internet-facing deployment.
 
 `AUTOWEBSITE_DEFAULT_GITHUB_TOKEN_REF` must be a reference resolved by the deployment's
 secret manager, not a raw GitHub token. The initial settings are used only if no admin
