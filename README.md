@@ -107,3 +107,145 @@ Generate a bcrypt hash without storing the plaintext password:
 ```
 
 For local HTTP-only testing, set `AUTOWEBSITE_SECURE_COOKIES=false`. Keep secure cookies enabled in production.
+
+## Production deployment: one Linux VM and one domain
+
+AutoWebsite runs privately; Nginx is the only Internet-facing service. Nginx serves the
+immutable `published/current` release at the domain and proxies `/admin`, `/static`,
+and `/health` to AutoWebsite on `127.0.0.1:8000`. It never serves the mutable
+checkout, staging tree, uploads, or agent workspaces.
+
+These instructions target a supported Debian or Ubuntu LTS VM. To support malware scans
+on uploaded images, the VM should have at least 2 vCPU, 4 GB RAM, and 25 GB SSD storage.
+1 vCPU and 1-2 GB RAM supports Uvicorn and Nginx for a small single-site installation.
+The other vCPU and 2GB RAM is for ClamAV malware scans The model inference itself runs
+on OpenAI infrastructure, not on the VM.
+
+Before starting, create DNS `A`/`AAAA` records for the intended domain and allow TCP
+ports 80 and 443 through the VM/provider firewall. Keep SSH access restricted to the
+administrator's network.
+
+1. **Clone the GitHub repository.** Do this first, with a deploy key or other
+   read-only GitHub credential if the repository is private.
+
+   ```bash
+   sudo adduser --system --group --home /srv/autowebsite autowebsite
+   sudo install -d -o autowebsite -g autowebsite -m 0750 /srv/autowebsite
+   sudo -u autowebsite git clone https://github.com/AbeAlsop/AutoWebsite.git /srv/autowebsite/app
+   ```
+
+2. **Install external dependencies.**
+
+   ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip git nginx certbot clamav-daemon curl
+   curl -fsSLo /tmp/codex-install.sh https://chatgpt.com/codex/install.sh
+   less /tmp/codex-install.sh
+   sudo -u autowebsite -H sh /tmp/codex-install.sh
+   rm /tmp/codex-install.sh
+   sudo -u autowebsite -H env PATH=/srv/autowebsite/.local/bin:$PATH codex --version
+   ```
+
+   `clamscan` may be used instead of `clamdscan`, but `clamdscan` avoids loading the
+   malware database for every upload. If you use `clamdscan`, ensure its daemon is
+   enabled and set the scan command below accordingly. Codex CLI is a separate local
+   executable: it edits the job workspace and requests inference from OpenAI; it is
+   not a local model server. Follow the current [Codex CLI setup
+   documentation](https://developers.openai.com/codex/) if its installation method or
+   authentication flow has changed.
+
+3. **Create the Python environment and protected state directories.**
+
+   ```bash
+   sudo -u autowebsite python3 -m venv /srv/autowebsite/app/.venv
+   sudo -u autowebsite /srv/autowebsite/app/.venv/bin/pip install -r /srv/autowebsite/app/admin/requirements.txt
+   sudo install -d -o autowebsite -g autowebsite -m 0750 \
+     /srv/autowebsite/state/{data,repos,staging,workspaces,published,uploads,logs}
+   ```
+
+4. **Configure the service.** Copy the supplied example outside the repository, then
+   edit it. Generate the password hash and session secret on the VM; do not put either
+   value in Git or the shell history.
+
+   ```bash
+   sudo install -d -m 0700 /etc/autowebsite
+   sudo cp /srv/autowebsite/app/deploy/autowebsite.env.example /etc/autowebsite/autowebsite.env
+   sudo chmod 600 /etc/autowebsite/autowebsite.env
+   sudo -u autowebsite /srv/autowebsite/app/.venv/bin/python -c "from admin.auth import hash_password; print(hash_password('choose a strong password'))"
+   openssl rand -hex 32
+   sudoedit /etc/autowebsite/autowebsite.env
+   ```
+
+   Put the generated bcrypt hash and random value in the matching environment entries.
+   Leave `AUTOWEBSITE_AGENT_ENABLED=false` until the app itself has started cleanly,
+   then authenticate Codex **as the `autowebsite` account** (for example, `sudo -u
+   autowebsite -H codex login`) using the production account/API credential you intend
+   to use. Do not store an OpenAI key in the repository or in a public systemd unit.
+   Set `AUTOWEBSITE_AGENT_ENABLED=true` only after a controlled test. Set
+   `AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND=clamdscan` when using the ClamAV daemon.
+
+5. **Install and start the private application service.**
+
+   ```bash
+   sudo cp /srv/autowebsite/app/deploy/autowebsite.service /etc/systemd/system/autowebsite.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now autowebsite
+   curl --fail http://127.0.0.1:8000/health
+   ```
+
+   The service deliberately binds to localhost. Check failures with `sudo journalctl
+   -u autowebsite -e` and do not expose port 8000 through the firewall. Now that the
+   service has created `published/releases`, grant Nginx traversal to the release path
+   without making the rest of the state tree listable:
+
+   ```bash
+   sudo chmod 0711 /srv/autowebsite /srv/autowebsite/state
+   sudo chmod 0755 /srv/autowebsite/state/published /srv/autowebsite/state/published/releases
+   ```
+
+6. **Configure Nginx and TLS.** Replace `example.com` in the supplied configuration
+   with the real domain (and remove `www` if it is not used). Obtain the certificate
+   before enabling the TLS configuration:
+
+   ```bash
+   sudo systemctl stop nginx
+   sudo certbot certonly --standalone -d example.com -d www.example.com
+   sudo cp /srv/autowebsite/app/deploy/nginx-autowebsite.conf /etc/nginx/sites-available/autowebsite
+   sudoedit /etc/nginx/sites-available/autowebsite
+   sudo ln -s /etc/nginx/sites-available/autowebsite /etc/nginx/sites-enabled/autowebsite
+   sudo rm -f /etc/nginx/sites-enabled/default
+   sudo nginx -t
+   sudo systemctl enable --now nginx
+   ```
+
+   Confirm `https://example.com/` displays the initial release and
+   `https://example.com/admin` displays the login page. Certbot's systemd timer renews
+   certificates on supported distributions; verify it with `sudo systemctl list-timers
+   | grep certbot` and test with `sudo certbot renew --dry-run`.
+
+7. **Lock down and verify the real workflow.** Restrict `/admin` to a VPN or stable
+   admin IP by enabling the example allow/deny rules in the Nginx config. Confirm a
+   rejected job changes neither staging nor production, approval changes only staging,
+   and the explicit publish action changes the public release. Back up
+   `/srv/autowebsite/state/data` and `/srv/autowebsite/state/published` before taking
+   production traffic.
+
+The included [systemd unit](deploy/autowebsite.service), [Nginx configuration](deploy/nginx-autowebsite.conf),
+and [environment template](deploy/autowebsite.env.example) are deployment templates,
+not secrets. Review them before each upgrade. Agent jobs currently use Codex CLI's
+workspace-write sandbox and a timeout, but they run as the application service user;
+for hostile/untrusted prompting, use a separate container/VM runner with an egress
+allowlist before enabling agent execution on an Internet-facing installation.
+
+## Audit logs
+
+Set `AUTOWEBSITE_LOGS_ROOT` to a protected server-local directory (the production
+template uses `/srv/autowebsite/state/logs`). AutoWebsite writes rotating JSON-lines
+files there: `web.log` for dashboard, upload, job, publication, and rollback actions;
+`agent.log` for job lifecycle and duration; and `security.log` for authentication and
+rejected security-sensitive operations. Each file rotates at 5 MB and retains five
+older files. Events include safe IDs such as the website, job, upload, and release IDs,
+but intentionally exclude prompts, passwords, sessions, tokens, filenames, upload
+contents, raw agent output, and error details. Use `sudo journalctl -u autowebsite` for
+the service process log and `sudo tail -f /srv/autowebsite/state/logs/web.log` to view
+the audit stream.

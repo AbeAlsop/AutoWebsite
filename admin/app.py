@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .audit import AuditLogger
 from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
 from .csrf import create_csrf_token, validate_csrf_token
@@ -18,7 +19,8 @@ from .uploads import UploadManager, UploadRejected
 
 app = FastAPI(title=settings.app_name)
 repository_store = RepositoryStore(settings.database_path)
-job_runner = JobRunner(repository_store, settings)
+audit_logger = AuditLogger(settings.logs_root, settings.public_site_dir)
+job_runner = JobRunner(repository_store, settings, audit_logger)
 upload_manager = UploadManager(repository_store, settings)
 publisher: SingleSitePublisher | None = None
 
@@ -30,6 +32,7 @@ app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="stat
 @app.on_event("startup")
 async def initialize_repository_store() -> None:
     global publisher
+    audit_logger.initialize()
     repository_store.initialize(
         bootstrap_username=settings.admin_username,
         bootstrap_password_hash=settings.admin_password_hash,
@@ -49,10 +52,12 @@ async def initialize_repository_store() -> None:
     )
     publisher.initialize()
     await job_runner.start(website)
+    audit_logger.event("web", "service_started", website_id=website.id)
 
 
 @app.on_event("shutdown")
 async def stop_job_runner() -> None:
+    audit_logger.event("web", "service_stopped")
     await job_runner.stop()
 
 
@@ -157,6 +162,7 @@ async def login(
     require_csrf(request, csrf_token)
     admin = repository_store.get_admin(username)
     if admin is None or not verify_password(password, admin.password_hash):
+        audit_logger.event("security", "login_failed")
         return render_template_with_csrf(
             request,
             "login.html",
@@ -179,12 +185,13 @@ async def login(
         secure=settings.secure_cookies,
         samesite="lax",
     )
+    audit_logger.event("security", "login_succeeded", website_id=admin.website_id, actor=admin.username)
     return response
 
 
 @app.post("/logout")
 async def logout(request: Request, csrf_token: Annotated[str | None, Form()] = None) -> RedirectResponse:
-    require_admin(request)
+    admin = require_admin(request)
     require_csrf(request, csrf_token)
     response = RedirectResponse(url="/admin", status_code=303)
     response.delete_cookie(
@@ -199,6 +206,7 @@ async def logout(request: Request, csrf_token: Annotated[str | None, Form()] = N
         secure=settings.secure_cookies,
         samesite="lax",
     )
+    audit_logger.event("security", "logout", website_id=admin.website_id, actor=admin.username)
     return response
 
 
@@ -261,6 +269,7 @@ async def submit_prompt(
         await attachment.close()
     job = repository_store.create_job(website.id, prompt, settings.agent_model, selected_upload_ids)
     job_runner.wake()
+    audit_logger.event("web", "job_queued", website_id=website.id, actor=admin.username, job_id=job.id, upload_count=len(selected_upload_ids), model=settings.agent_model)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -275,7 +284,9 @@ async def rescan_upload(
     try:
         await upload_manager.rescan_upload(admin.website_id, upload_id)
     except UploadRejected as error:
+        audit_logger.event("security", "upload_rescan_rejected", website_id=admin.website_id, actor=admin.username, upload_id=upload_id)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    audit_logger.event("web", "upload_rescanned", website_id=admin.website_id, actor=admin.username, upload_id=upload_id)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -298,6 +309,7 @@ async def delete_upload(
         )
     if not upload_manager.delete_upload(admin.website_id, upload_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    audit_logger.event("web", "upload_deleted", website_id=admin.website_id, actor=admin.username, upload_id=upload_id)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -335,6 +347,7 @@ async def reprompt_job(
     except RepositoryConfigurationError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     job_runner.wake()
+    audit_logger.event("web", "job_reprompted", website_id=website.id, actor=admin.username, job_id=job.id, previous_job_id=previous.id, upload_count=len(selected_upload_ids), model=settings.agent_model)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -350,7 +363,9 @@ async def upload_file(
     try:
         stored = await upload_manager.store_upload(website.id, file)
     except UploadRejected as error:
+        audit_logger.event("security", "upload_rejected", website_id=website.id, actor=admin.username)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    audit_logger.event("web", "upload_approved", website_id=website.id, actor=admin.username, upload_id=stored.upload.id, size=stored.upload.size or 0, mime_type=stored.upload.mime_type or "unknown")
     return JSONResponse(
         {
             "id": stored.upload.id,
@@ -409,7 +424,7 @@ async def job_preview(request: Request, job_id: str, asset_path: str = "") -> Re
 
 @app.get("/staging/preview")
 async def staging_preview_directory_redirect(request: Request) -> RedirectResponse:
-    require_admin(request)
+    admin = require_admin(request)
     return RedirectResponse(url="/staging/preview/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -425,14 +440,16 @@ async def publish_staging(
     request: Request,
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> RedirectResponse:
-    require_admin(request)
+    admin = require_admin(request)
     require_csrf(request, csrf_token)
     if publisher is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Publisher is initializing")
     try:
         release = publisher.publish_directory(get_staging_directory())
     except (OSError, SiteLayoutError) as error:
+        audit_logger.event("security", "publication_failed", website_id=admin.website_id, actor=admin.username)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to publish staging") from error
+    audit_logger.event("web", "publication_succeeded", website_id=admin.website_id, actor=admin.username, release_id=release.release_id)
     return RedirectResponse(url=f"/dashboard?published={release.release_id}", status_code=303)
 
 
@@ -445,7 +462,10 @@ def serve_preview_file(directory: Path, asset_path: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found") from error
     if requested.is_dir():
         requested = requested / "index.html"
-    if any(part in {".env", ".env.local", ".git", ".ssh"} for part in requested.relative_to(root).parts):
+    if any(
+        part in {".env", ".env.local", ".git", ".ssh", ".autowebsite-upload-inputs"}
+        for part in requested.relative_to(root).parts
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
     if not requested.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
@@ -469,6 +489,7 @@ async def approve_job(
     if not repository_store.approve_job(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
     job_runner.wake()
+    audit_logger.event("web", "job_approved", website_id=admin.website_id, actor=admin.username, job_id=job_id)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -483,6 +504,7 @@ async def reject_job(
     if not repository_store.reject_job(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft is not awaiting review")
     job_runner.wake()
+    audit_logger.event("web", "job_rejected", website_id=admin.website_id, actor=admin.username, job_id=job_id)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -494,8 +516,9 @@ async def cancel_job(
 ) -> RedirectResponse:
     admin = require_admin(request)
     require_csrf(request, csrf_token)
-    if not repository_store.request_cancel(job_id, admin.website_id):
+    if not job_runner.request_cancel(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job cannot be cancelled")
+    audit_logger.event("web", "job_cancel_requested", website_id=admin.website_id, actor=admin.username, job_id=job_id)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -512,6 +535,7 @@ async def retry_job(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only failed or cancelled jobs can be retried")
     job = repository_store.create_job(admin.website_id, previous.prompt, settings.agent_model)
     job_runner.wake()
+    audit_logger.event("web", "job_retried", website_id=admin.website_id, actor=admin.username, job_id=job.id, previous_job_id=previous.id, model=settings.agent_model)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -525,6 +549,7 @@ async def rollback(
     require_csrf(request, csrf_token)
     website = get_authorized_website(admin)
     # Phase 14 implements rollback behavior.
+    audit_logger.event("web", "rollback_queued", website_id=website.id, actor=admin.username)
     return JSONResponse(
         {
             "status": "queued",

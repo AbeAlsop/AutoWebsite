@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import os
+import signal
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from .audit import AuditLogger
 from .config import Settings
 from .repository import Job, RepositoryStore, Upload, Website
 from .staging import StagingArea
@@ -29,6 +33,17 @@ class CodexAgent:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._cancelled: set[str] = set()
+        self._process_lock = threading.Lock()
+
+    def cancel(self, job_id: str) -> None:
+        """Mark a job cancelled and terminate its agent process if it has started."""
+        with self._process_lock:
+            self._cancelled.add(job_id)
+            process = self._processes.get(job_id)
+        if process is not None:
+            self._terminate_process(process)
 
     def run(self, workspace: Path, prompt: str, job_id: str, uploads: list[Upload]) -> AgentResult:
         if not self.settings.agent_enabled:
@@ -54,26 +69,70 @@ class CodexAgent:
             str(workspace),
             self._build_prompt(system_prompt, prompt, uploads),
         ]
+        with self._process_lock:
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                return AgentResult("", "Agent execution cancelled.")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=workspace,
-                check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.settings.agent_timeout_seconds,
+                start_new_session=(os.name == "posix"),
             )
         except FileNotFoundError:
             return AgentResult("", f"Agent command was not found: {self.settings.agent_command}")
-        except subprocess.TimeoutExpired:
-            return AgentResult("", "Agent execution timed out.")
 
-        output = self._limit_output(completed.stdout + completed.stderr)
+        with self._process_lock:
+            self._processes[job_id] = process
+            cancelled = job_id in self._cancelled
+        if cancelled:
+            self._terminate_process(process)
+
+        timeout_error = False
+        try:
+            stdout, stderr = process.communicate(timeout=self.settings.agent_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self._terminate_process(process)
+            stdout, stderr = process.communicate()
+            timeout_error = True
+        finally:
+            with self._process_lock:
+                self._processes.pop(job_id, None)
+                self._cancelled.discard(job_id)
+
+        output = self._limit_output(stdout + stderr)
         if final_message_path.is_file():
             output = self._limit_output(final_message_path.read_text(encoding="utf-8", errors="replace") + "\n" + output)
-        if completed.returncode != 0:
-            return AgentResult(output, f"Codex exited with status {completed.returncode}.")
+        if timeout_error:
+            return AgentResult(output, "Agent execution timed out.")
+        if process.returncode != 0:
+            return AgentResult(output, f"Codex exited with status {process.returncode}.")
         return AgentResult(output, None)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                return
+            process.wait()
 
     def _build_prompt(self, system_prompt: str, administrator_prompt: str, uploads: list[Upload]) -> str:
         upload_metadata = "\n".join(
@@ -115,9 +174,10 @@ calculates the actual changed-file list and diff.
 class JobRunner:
     """Processes one durable job at a time from the current private staging revision."""
 
-    def __init__(self, store: RepositoryStore, settings: Settings) -> None:
+    def __init__(self, store: RepositoryStore, settings: Settings, audit_logger: AuditLogger | None = None) -> None:
         self.store = store
         self.settings = settings
+        self.audit_logger = audit_logger
         self.agent = CodexAgent(settings)
         self.staging_area: StagingArea | None = None
         self._wake_event = asyncio.Event()
@@ -144,6 +204,17 @@ class JobRunner:
     def wake(self) -> None:
         self._wake_event.set()
 
+    def request_cancel(self, job_id: str, website_id: int) -> bool:
+        job = self.store.get_job(job_id, website_id)
+        if job is None or job.status not in {"queued", "running"}:
+            return False
+        if not self.store.request_cancel(job_id, website_id):
+            return False
+        if job.status == "running":
+            self.agent.cancel(job_id)
+        self.wake()
+        return True
+
     async def _run(self, website: Website) -> None:
         while True:
             job = self.store.claim_next_job(website.id)
@@ -155,6 +226,8 @@ class JobRunner:
 
     async def _execute(self, job: Job, website: Website) -> None:
         workspace = self.settings.workspaces_root / job.id
+        started_at = asyncio.get_running_loop().time()
+        self._audit("job_started", job_id=job.id, website_id=website.id, model=job.model or "unknown")
         try:
             if self.staging_area is None:
                 raise RuntimeError("The staging area has not been initialized.")
@@ -167,6 +240,7 @@ class JobRunner:
             current = self.store.get_job(job.id, website.id)
             if current is not None and current.status == "cancel_requested":
                 self.store.complete_job(job.id, status="cancelled", workspace_directory=workspace)
+                self._audit("job_cancelled", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
                 return
             if result.error:
                 self.store.complete_job(
@@ -176,6 +250,7 @@ class JobRunner:
                     error=result.error,
                     workspace_directory=workspace,
                 )
+                self._audit("job_failed", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
                 return
 
             changed_files, diff = self._diff_directories(source_directory, workspace)
@@ -190,6 +265,7 @@ class JobRunner:
                     diff=diff,
                     workspace_directory=workspace,
                 )
+                self._audit("job_failed_policy", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at), changed_file_count=len(changed_files))
                 return
             self.store.complete_job(
                 job.id,
@@ -199,8 +275,18 @@ class JobRunner:
                 diff=diff,
                 workspace_directory=workspace,
             )
+            self._audit("job_awaiting_review", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at), changed_file_count=len(changed_files))
         except Exception as error:  # Keep worker failures visible in the durable job record.
             self.store.complete_job(job.id, status="failed", error=str(error), workspace_directory=workspace)
+            self._audit("job_failed_exception", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
+
+    def _audit(self, event: str, **fields: object) -> None:
+        if self.audit_logger is not None:
+            self.audit_logger.event("agent", event, **fields)
+
+    @staticmethod
+    def _duration_ms(started_at: float) -> int:
+        return max(0, int((asyncio.get_running_loop().time() - started_at) * 1000))
 
     def _prepare_workspace(self, source: Path, workspace: Path) -> None:
         source_root = source.resolve(strict=True)

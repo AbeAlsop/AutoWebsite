@@ -61,7 +61,12 @@ class StagingArea:
         revision_id = uuid.uuid4().hex
         destination = self.revisions_directory / revision_id
         self._validate_tree(source)
-        shutil.copytree(source, destination, symlinks=False, ignore=shutil.ignore_patterns(".git", ".DS_Store", "__pycache__"))
+        shutil.copytree(
+            source,
+            destination,
+            symlinks=False,
+            ignore=shutil.ignore_patterns(".git", ".DS_Store", "__pycache__", ".autowebsite-upload-inputs"),
+        )
         self._switch_current(destination)
         return StagingRevision(revision_id, destination)
 

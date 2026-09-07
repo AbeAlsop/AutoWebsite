@@ -67,3 +67,47 @@ def test_publishes_a_staging_directory_without_mutating_source(tmp_path: Path):
     assert (publisher.current_release_pointer / "index.html").read_text(encoding="utf-8") == "staged"
     assert (publisher.source_directory / "index.html").read_text(encoding="utf-8") == "live"
     assert release.directory.is_dir()
+
+
+def test_rejects_executable_or_non_static_publish_files(tmp_path: Path):
+    starter = tmp_path / "starter"
+    starter.mkdir()
+    (starter / "index.html").write_text("live", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "index.html").write_text("staged", encoding="utf-8")
+    script = staging / "deploy.sh"
+    script.write_text("#!/bin/sh", encoding="utf-8")
+    script.chmod(0o755)
+    publisher = SingleSitePublisher(
+        repositories_root=tmp_path / "repos",
+        published_root=tmp_path / "published",
+        source_directory=tmp_path / "repos" / "active-site",
+        starter_site_directory=starter,
+    )
+    publisher.initialize()
+
+    try:
+        publisher.publish_directory(staging)
+    except SiteLayoutError as error:
+        assert "non-static" in str(error) or "Executable" in str(error)
+    else:
+        raise AssertionError("Executable deployment files must not be published")
+
+
+def test_ignores_macos_finder_metadata_when_publishing(tmp_path: Path):
+    starter = tmp_path / "starter"
+    starter.mkdir()
+    (starter / "index.html").write_text("live", encoding="utf-8")
+    (starter / ".DS_Store").write_bytes(b"finder metadata")
+    publisher = SingleSitePublisher(
+        repositories_root=tmp_path / "repos",
+        published_root=tmp_path / "published",
+        source_directory=tmp_path / "repos" / "active-site",
+        starter_site_directory=starter,
+    )
+
+    release = publisher.initialize()
+
+    assert (release.directory / "index.html").is_file()
+    assert not (release.directory / ".DS_Store").exists()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,16 @@ from pathlib import Path
 
 class SiteLayoutError(RuntimeError):
     """Raised when a source or release path falls outside the permitted layout."""
+
+
+_ALLOWED_PUBLIC_SUFFIXES = {
+    ".avif", ".css", ".gif", ".htm", ".html", ".ico", ".jpeg", ".jpg",
+    ".js", ".json", ".map", ".mjs", ".png", ".svg", ".txt", ".webmanifest",
+    ".webp", ".woff", ".woff2", ".xml",
+}
+_FORBIDDEN_PUBLIC_NAMES = {".env", ".git", ".ssh", "id_rsa"}
+_IGNORED_RELEASE_NAMES = (".git", ".DS_Store", ".autowebsite-upload-inputs")
+_MAX_PUBLIC_FILE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -49,7 +60,7 @@ class SingleSitePublisher:
         if not source.exists():
             starter = self.starter_site_directory.resolve(strict=True)
             self._validate_tree(starter, starter)
-            shutil.copytree(starter, source, symlinks=False)
+            shutil.copytree(starter, source, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_RELEASE_NAMES))
 
         if not source.is_dir():
             raise SiteLayoutError("The active-site source path must be a directory.")
@@ -76,7 +87,7 @@ class SingleSitePublisher:
         self.releases_directory.mkdir(parents=True, exist_ok=True)
         release_id = uuid.uuid4().hex
         release_directory = self.releases_directory / release_id
-        shutil.copytree(source, release_directory, symlinks=False, ignore=shutil.ignore_patterns(".git", ".DS_Store"))
+        shutil.copytree(source, release_directory, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_RELEASE_NAMES))
         self._switch_current_release(release_directory)
         return PublishedRelease(release_id, release_directory)
 
@@ -108,7 +119,33 @@ class SingleSitePublisher:
 
     @classmethod
     def _validate_tree(cls, directory: Path, root: Path) -> None:
+        index = directory / "index.html"
+        if not index.is_file() or index.is_symlink():
+            raise SiteLayoutError("A published site must contain a regular top-level index.html file.")
         for path in directory.rglob("*"):
+            relative_parts = path.relative_to(directory).parts
+            # A Git checkout is never copied into a release; allow its private
+            # metadata while validating the publishable working tree.
+            if any(part in {".git", ".autowebsite-upload-inputs"} for part in relative_parts):
+                continue
+            # macOS Finder metadata is not part of a web release and is already
+            # excluded by copytree during publication.
+            if path.name == ".DS_Store":
+                continue
             if path.is_symlink():
                 resolved = path.resolve(strict=True)
                 cls._require_within(resolved, root, "symlink target")
+                raise SiteLayoutError("Published sites cannot contain symlinks.")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise SiteLayoutError("Published sites may contain regular files only.")
+            if path.name in _FORBIDDEN_PUBLIC_NAMES:
+                raise SiteLayoutError(f"The file {path.name} is not allowed in a published site.")
+            if path.suffix.lower() not in _ALLOWED_PUBLIC_SUFFIXES:
+                raise SiteLayoutError(f"The non-static file {path.name} is not allowed in a published site.")
+            file_mode = path.stat().st_mode
+            if file_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                raise SiteLayoutError(f"Executable file {path.name} is not allowed in a published site.")
+            if path.stat().st_size > _MAX_PUBLIC_FILE_BYTES:
+                raise SiteLayoutError(f"The file {path.name} exceeds the public release size limit.")

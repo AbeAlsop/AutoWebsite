@@ -82,6 +82,10 @@ body {
     margin: 0;
 }
 
+.cancel-job-form {
+    margin-top: 12px;
+}
+
 details {
     margin-top: 12px;
 }
@@ -106,15 +110,32 @@ button.secondary {
     padding: 0 4px;
 }
 
-.upload-warning {
-    color: #8a3b12;
-    font-weight: 700;
+.delete-upload-disabled {
+    cursor: not-allowed;
+    display: inline-block;
+}
+
+.delete-upload-button:disabled {
+    color: #9aa0a8;
+    cursor: not-allowed;
 }
 
 label {
     display: grid;
     gap: 6px;
     font-weight: 700;
+}
+
+fieldset label {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+}
+
+fieldset input[type="checkbox"] {
+    margin: 0;
+    padding: 0;
+    width: auto;
 }
 
 input,

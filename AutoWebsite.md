@@ -366,9 +366,21 @@ upload store to the agent.
 # Phase 10 – Single-Site Production Safety and Release Gate
 
 Deploy the proof of concept on one Linux VM under a non-root `autowebsite` service
-account. Run the application without development reload/debug mode behind a TLS
-reverse proxy. The proxy is the only Internet-facing process: it serves the public
-site and forwards `/admin` to the app over localhost or a Unix socket.
+account. The production README must provide a tested, ordered deployment path beginning
+with cloning the GitHub repository, then installing Python, Git, and the Codex CLI,
+Nginx, and a malware scanner; creating a virtual environment and protected state
+directories; configuring secrets; and enabling a systemd unit. Recommend a minimum of
+2 vCPU, 4 GB RAM, and 25 GB SSD for the one-site deployment, with more memory if
+ClamAV runs locally. Codex is an external CLI executable and uses OpenAI-hosted model
+inference; it is not a local model server.
+
+Run the application without development reload/debug mode behind Nginx and TLS. Nginx
+is the only Internet-facing process: it serves the public site's atomically switched
+`published/current` release for `/`, forwards `/admin`, `/static`, and `/health` to
+the app on localhost or a Unix socket, redirects HTTP to HTTPS, and renews the
+configured domain certificate. The public server must never serve the source checkout,
+staging tree, uploads, or job workspaces. Document DNS, firewall ports, certificate
+issuance, and an optional VPN/IP allowlist for the sole administrator.
 
 Keep the Git checkout, cumulative staging tree, disposable job workspaces, application
 data, logs, and published releases in separate permission-restricted directories. Only
@@ -380,10 +392,13 @@ allowlist. No registration, default credentials, or multi-user roles are added h
 Run each agent job as an unprivileged, resource-limited process/container with only its
 own workspace writable. It must not receive service or Git credentials, host sockets,
 the source/staging/published trees, or the shared upload store. Give it network access
-only when required for Codex/OpenAI, and then only through a narrow egress policy. A
-job starts from the current staging revision; the application rechecks its output and
-serializes staging updates so an old job cannot overwrite a newer one. On cancellation
-or timeout, terminate the job and leave staging and production unchanged.
+only when required for Codex/OpenAI, and then only through a narrow egress policy. The
+initial CLI integration provides a workspace-write sandbox and timeout, but does not by
+itself provide OS-level credential or filesystem isolation; require a separate
+container/VM runner before enabling hostile/untrusted agent workloads. A job starts
+from the current staging revision; the application rechecks its output and serializes
+staging updates so an old job cannot overwrite a newer one. On cancellation or timeout,
+terminate the job and leave staging and production unchanged.
 
 Before a staging revision can be published, build an immutable candidate and require:
 
@@ -401,7 +416,47 @@ before accepting production traffic.
 
 ---
 
-# Phase 11 – Git History, Publication, and Rollback
+# Phase 11 – Logging
+
+For the single site, maintain a durable audit trail and logs:
+
+```
+logs/
+
+agent.log
+
+web.log
+
+security.log
+```
+
+Write line-delimited JSON records with an event name, timestamp, website ID, and the
+currently active release ID when available. Rotate each file at a bounded size and keep
+a small fixed number of prior files. Store logs beneath a server-configured,
+permission-restricted `AUTOWEBSITE_LOGS_ROOT` (for the Linux deployment,
+`/srv/autowebsite/state/logs`), not in the application checkout.
+
+Record
+
+- login
+- logout
+- uploads
+- prompts
+- commits
+- rollbacks
+- failures
+
+Include the job ID and active release ID with every agent, validation, publication,
+rollback, and security event. Record the duration of each edit job that users perform.
+Retain enough information to diagnose a failed release
+without recording secrets or uploaded file contents in logs. Enforce this at the log
+writer: reject fields whose names indicate prompts, passwords, tokens, sessions,
+cookies, secrets, paths, filenames, or content. Do not log raw agent output or error
+strings; use stable outcome events and safe IDs/counts instead.
+
+---
+
+# Phase 12 – Git History, Publication, and Rollback
 
 After the Phase 10 checks and administrator approval, serialize this single site's Git
 workflow:
@@ -436,7 +491,7 @@ When a version is committed, the changes in that revision combine into a single 
 
 ---
 
-# Phase 12 – AutoWebsite Hosting and Publication
+# Phase 13 – AutoWebsite Hosting and Publication
 
 This phase adds the production hosting feature, rather than only storing a validated
 release on the VM. AutoWebsite serves the active static release at the configured public
@@ -444,44 +499,13 @@ domain/route while continuing to serve administration only at `/admin`. Configur
 domain, TLS certificate renewal, HTTP-to-HTTPS redirect, and restrictive public static
 file serving in the deployment environment.
 
-Publication takes the immutable candidate produced in Phases 10–11, creates a new release
+Publication takes the immutable candidate produced in Phase 10, creates a new release
 directory, and atomically changes the public-server target only after the Git commit
 and administrator approval succeed. Keep the previous release available until a post-publication
 health check passes, so a failed switch can be reversed without serving a partial site.
 GitHub is the source-of-truth backup and collaboration remote, not the production host
 in this phase. GitHub Pages, Cloudflare Pages, and Netlify can become optional
 deployment adapters after the hosted proof of concept is stable.
-
----
-
-# Phase 13 – Logging
-
-For the single site, maintain a durable audit trail and logs:
-
-```
-logs/
-
-agent.log
-
-web.log
-
-security.log
-```
-
-Record
-
-- login
-- logout
-- uploads
-- prompts
-- commits
-- rollbacks
-- failures
-
-Include the job ID and active release ID with every agent, validation, publication,
-rollback, and security event. Record the duration of each edit job that users perform.
-Retain enough information to diagnose a failed release
-without recording secrets or uploaded file contents in logs.
 
 ---
 

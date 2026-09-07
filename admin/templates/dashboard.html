@@ -8,7 +8,7 @@
         <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Log out</button></form>
     </header>
 
-    <form action="/prompt" method="post" enctype="multipart/form-data" class="stack">
+    <form id="prompt-form" action="/prompt" method="post" enctype="multipart/form-data" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Prompt<textarea name="prompt" rows="8" required></textarea></label>
         <label>Attach a file for this prompt (optional)<input type="file" name="attachment"></label>
@@ -22,7 +22,8 @@
                 {% endfor %}
             </fieldset>
         {% endif %}
-        <button type="submit">Submit prompt</button>
+        <button id="prompt-submit" type="submit">Submit prompt</button>
+        <p id="prompt-result" class="muted" role="status" aria-live="polite"></p>
     </form>
 
     <section aria-labelledby="staging-heading">
@@ -57,8 +58,16 @@
             {% endfor %}
             {% for job in active_jobs %}
                 <article class="job" id="job-{{ job.id }}" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
-                    <header class="job-header"><h4>{{ job.status | replace("_", " ") | title }}</h4><span class="job-spinner" role="status" aria-label="Agent job is running"></span></header>
+                    <header class="job-header"><h4>{{ job.status | replace("_", " ") | title }}</h4>{% if job.status in ["queued", "running"] %}<span class="job-spinner" role="status" aria-label="Agent job is running"></span>{% endif %}</header>
                     <p>{{ job.prompt }}</p>
+                    {% if job.status in ["queued", "running"] %}
+                        <form class="cancel-job-form" action="/jobs/{{ job.id }}/cancel" method="post">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="secondary">Stop</button>
+                        </form>
+                    {% elif job.status == "cancel_requested" %}
+                        <p class="muted">Stop requested; waiting for the agent to exit.</p>
+                    {% endif %}
                 </article>
             {% endfor %}
         {% else %}
@@ -78,16 +87,15 @@
             <ul>
                 {% for upload in uploads %}
                     {% set locations = upload_usage.get(upload.id, ()) %}
-                    {% set warning = "Delete this upload?" %}
-                    {% if locations %}{% set warning = "This upload is attached to " ~ locations | join(", ") ~ " and cannot be deleted until that job finishes." %}{% endif %}
+                    {% set delete_title = "Delete upload" %}
+                    {% if locations %}{% set delete_title = "Attached to " ~ locations | join(", ") ~ "; cannot delete until that job finishes." %}{% endif %}
                     <li>
                         {{ upload.original_filename }} · {{ upload.status }}{% if upload.mime_type %} · {{ upload.mime_type }}{% endif %}{% if upload.width and upload.height %} · {{ upload.width }}×{{ upload.height }}{% endif %}
-                        {% if locations %}<span class="upload-warning"> · Attached to {{ locations | join(", ") }}; cannot delete</span>{% endif %}
                         {% if upload.error %}<span class="error"> · {{ upload.error }}</span>{% endif %}
                         {% if upload.error in ["Malware scanner is unavailable; upload remains quarantined.", "Malware scanner timed out; upload remains quarantined."] %}
                             <form action="/uploads/{{ upload.id }}/rescan" method="post" style="display: inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="secondary">Rescan</button></form>
                         {% endif %}
-                        <form class="delete-upload-form" action="/uploads/{{ upload.id }}/delete" method="post" data-warning="{{ warning }}" data-in-use="{{ 'true' if locations else 'false' }}" style="display: inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="delete-upload-button" aria-label="Delete {{ upload.original_filename }}" title="Delete upload">×</button></form>
+                        <form class="delete-upload-form" action="/uploads/{{ upload.id }}/delete" method="post" style="display: inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% if locations %}<span class="delete-upload-disabled" title="{{ delete_title }}"><button type="submit" class="delete-upload-button" aria-label="Delete {{ upload.original_filename }}" disabled>×</button></span>{% else %}<button type="submit" class="delete-upload-button" aria-label="Delete {{ upload.original_filename }}" title="{{ delete_title }}">×</button>{% endif %}</form>
                     </li>
                 {% endfor %}
             </ul>

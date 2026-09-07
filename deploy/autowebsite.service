@@ -1,0 +1,38 @@
+[Unit]
+Description=AutoWebsite administration service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autowebsite
+Group=autowebsite
+WorkingDirectory=/srv/autowebsite/app
+EnvironmentFile=/etc/autowebsite/autowebsite.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/srv/autowebsite/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/srv/autowebsite/app/.venv/bin/uvicorn admin.app:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=on-failure
+RestartSec=5
+# These limits apply to both Uvicorn and its short-lived Codex child process.
+# Adjust after observing a real site's build requirements; do not remove the
+# timeout configured in AUTOWEBSITE_AGENT_TIMEOUT_SECONDS.
+MemoryHigh=1500M
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=256
+
+# Do not enable ProtectHome until Codex authentication is stored outside the
+# service account home and AUTOWEBSITE_AGENT_COMMAND is configured accordingly.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/srv/autowebsite/state
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,20 @@
 (() => {
+    const promptForm = document.querySelector("#prompt-form");
+    const promptSubmit = document.querySelector("#prompt-submit");
+    const promptResult = document.querySelector("#prompt-result");
+    if (promptForm && promptSubmit && promptResult) {
+        promptForm.addEventListener("submit", (event) => {
+            if (promptForm.dataset.submitting === "true") {
+                event.preventDefault();
+                return;
+            }
+            promptForm.dataset.submitting = "true";
+            promptSubmit.disabled = true;
+            promptSubmit.textContent = "Submitting…";
+            promptResult.textContent = "Submitting prompt and starting the agent job…";
+        });
+    }
+
     const uploadForm = document.querySelector("#upload-form");
     const uploadResult = document.querySelector("#upload-result");
     if (uploadForm && uploadResult) {
@@ -30,15 +46,21 @@
     const terminalStatuses = new Set(["awaiting_review", "failed", "cancelled", "approved"]);
     const jobs = [...document.querySelectorAll("[data-job-id]")];
 
-    for (const form of document.querySelectorAll(".delete-upload-form")) {
+    for (const form of document.querySelectorAll(".cancel-job-form")) {
         form.addEventListener("submit", (event) => {
-            if (form.dataset.inUse === "true") {
+            if (form.dataset.submitting === "true") {
                 event.preventDefault();
-                window.alert(form.dataset.warning || "This upload is in use and cannot be deleted.");
                 return;
             }
-            if (!window.confirm(form.dataset.warning || "Delete this upload?")) {
+            if (!window.confirm("Stop this job?")) {
                 event.preventDefault();
+                return;
+            }
+            form.dataset.submitting = "true";
+            const button = form.querySelector("button[type=submit]");
+            if (button) {
+                button.disabled = true;
+                button.textContent = "Stopping…";
             }
         });
     }
