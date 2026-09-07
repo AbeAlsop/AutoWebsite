@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title | default(app_name | default("AutoWebsite")) }}</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/admin.css') }}">
+    <script src="{{ url_for('static', path='/admin.js') }}" defer></script>
 </head>
 <body>
     <main class="shell">
@@ -12,4 +13,3 @@
     </main>
 </body>
 </html>
-

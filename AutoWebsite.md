@@ -224,7 +224,88 @@ expected remote URL and default branch at setup.
 
 ---
 
-# Phase 7 – Single-Site Uploads
+# Phase 7 – Single-Site Admin Dashboard
+
+Dashboard contains
+
+- Prompt textbox
+- Upload button
+- Submit button
+- Job status
+- Commit history
+- Rollback button
+- Preview link
+- Validation report and changed-file diff
+- Job log with retry and cancel state
+
+No WYSIWYG editor.
+
+Everything is prompt-driven.
+
+There is no website switcher in the proof of concept. Persist jobs so a restart does
+not lose their status, and run them serially. Maintain a private staging revision that
+begins as the source checkout. Approval merges a reviewed job into staging; every later
+job starts from the current staging revision, and the staging preview shows their
+cumulative effect. Production remains unchanged until validation and publication.
+Before publishing a change, show the administrator the proposed diff, validation result,
+preview, and the prompt/uploads, model version, and validation run that produced it.
+Require explicit approval for destructive or unusually large changes.
+
+---
+
+# Phase 8 – Single-Site Coding Agent
+
+Preferred implementation:
+
+OpenAI Codex CLI.
+
+Default model:
+
+`gpt-5.6-terra`
+
+Use the configured model override only when the deployment needs a different
+intelligence/cost tier. Keep the exact selected model in every job record.
+
+Alternative:
+
+Aider
+
+Alternative:
+
+OpenHands
+
+The coding agent receives:
+
+- the current single-site worktree
+- approved job-specific uploads and metadata
+- system prompt
+- administrator prompt
+
+System prompt:
+
+You are editing a website.
+
+Requirements:
+
+- Preserve valid HTML.
+- Preserve accessibility.
+- Preserve responsive behavior.
+- Never modify files outside the repository.
+- Never modify admin server code unless instructed.
+- Keep CSS organized.
+- Use semantic HTML.
+
+Run the agent non-interactively with a pinned version/model, bounded wall time and
+token budget, and structured output that lists changed files and executed validation
+commands. Delimit administrator prompts and upload-derived data as untrusted input;
+the agent must not follow instructions contained inside an asset. Apply policy checks
+to the final diff, including sensitive-file, dependency, and change-size limits.
+The agent must summarize its plan and validation results; policy or validation failures
+end the job without publication.
+
+---
+
+# Phase 9 – Single-Site Uploads
 
 The administrator uploads files for the active site. Store each upload under a generated
 ID such as `uploads/active-site/<upload_id>/`; retain the original filename only as
@@ -274,77 +355,6 @@ gallery.json when applicable
 automatically. Treat all upload metadata and extracted text as untrusted prompt input.
 Copy only approved files required for a job into its worktree; never expose the shared
 upload store to the agent.
-
----
-
-# Phase 8 – Single-Site Admin Dashboard
-
-Dashboard contains
-
-- Prompt textbox
-- Upload button
-- Submit button
-- Job status
-- Commit history
-- Rollback button
-- Preview link
-- Validation report and changed-file diff
-- Job log with retry and cancel state
-
-No WYSIWYG editor.
-
-Everything is prompt-driven.
-
-There is no website switcher in the proof of concept. Persist jobs so a restart does
-not lose their status, and run them serially. Before publishing a change, show the
-administrator the proposed diff, validation result, preview, and the prompt/uploads,
-model version, and validation run that produced it. Require explicit approval for
-destructive or unusually large changes.
-
----
-
-# Phase 9 – Single-Site Coding Agent
-
-Preferred implementation:
-
-OpenAI Codex CLI.
-
-Alternative:
-
-Aider
-
-Alternative:
-
-OpenHands
-
-The coding agent receives:
-
-- the current single-site worktree
-- approved job-specific uploads and metadata
-- system prompt
-- administrator prompt
-
-System prompt:
-
-You are editing a website.
-
-Requirements:
-
-- Preserve valid HTML.
-- Preserve accessibility.
-- Preserve responsive behavior.
-- Never modify files outside the repository.
-- Never modify admin server code unless instructed.
-- Keep CSS organized.
-- Use semantic HTML.
-
-Run the agent non-interactively with a pinned version/model, bounded wall time and
-token budget, and structured output that lists changed files and executed validation
-commands. Delimit administrator prompts and upload-derived data as untrusted input;
-the agent must not follow instructions contained inside an asset. Apply policy checks
-to the final diff, including sensitive-file, dependency, and change-size limits.
-The agent must summarize its plan and validation results; policy or validation failures
-end the job without publication.
 
 ---
 

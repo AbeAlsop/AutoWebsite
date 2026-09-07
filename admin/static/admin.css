@@ -34,6 +34,70 @@ body {
     margin-top: 24px;
 }
 
+.jobs {
+    margin-top: 32px;
+}
+
+.job {
+    border-top: 1px solid #d8dde5;
+    margin-top: 20px;
+    padding-top: 20px;
+}
+
+.job-header,
+.job-actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: space-between;
+}
+
+.job-header h3 {
+    margin: 0;
+}
+
+.job-spinner {
+    animation: job-spin 0.8s linear infinite;
+    border: 3px solid #d8dde5;
+    border-top-color: #2457d6;
+    border-radius: 50%;
+    display: inline-block;
+    height: 14px;
+    margin-left: 8px;
+    vertical-align: -2px;
+    width: 14px;
+}
+
+@keyframes job-spin {
+    to { transform: rotate(360deg); }
+}
+
+.job-actions {
+    justify-content: flex-start;
+    margin-top: 16px;
+}
+
+.job-actions form {
+    margin: 0;
+}
+
+details {
+    margin-top: 12px;
+}
+
+pre {
+    max-height: 320px;
+    overflow: auto;
+    padding: 12px;
+    white-space: pre-wrap;
+    background: #f6f7f9;
+}
+
+button.secondary {
+    background: #5d6675;
+}
+
 label {
     display: grid;
     gap: 6px;

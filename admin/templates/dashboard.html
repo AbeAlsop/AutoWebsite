@@ -29,6 +29,77 @@
         <button type="submit">Upload file</button>
     </form>
 
-    <p><a href="/history">View history</a></p>
+    <p>
+        <a href="/history">View history</a>
+        · <a href="/staging/preview">Open staging preview</a>
+        <span class="muted">(revision {{ staging_revision }})</span>
+    </p>
+
+    <section class="jobs" aria-labelledby="jobs-heading">
+        <h2 id="jobs-heading">Agent jobs</h2>
+        {% if jobs %}
+            {% for job in jobs %}
+                <article class="job" id="job-{{ job.id }}" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+                    <header class="job-header">
+                        <h3>
+                            <span class="job-status">{{ job.status | replace("_", " ") | title }}</span>
+                            {% if job.status in ["queued", "running"] %}
+                                <span class="job-spinner" role="status" aria-label="Agent job is running"></span>
+                            {% endif %}
+                        </h3>
+                        <code>{{ job.id }}</code>
+                    </header>
+                    <p>{{ job.prompt }}</p>
+                    <p class="muted">Model: {{ job.model }} · Changed files: {{ job.changed_files | length }}</p>
+                    {% if job.workspace_directory %}
+                        <p><a href="/jobs/{{ job.id }}/preview">Open private preview</a></p>
+                    {% endif %}
+                    {% if job.changed_files %}
+                        <details>
+                            <summary>Changed files</summary>
+                            <ul>
+                                {% for file in job.changed_files %}<li><code>{{ file }}</code></li>{% endfor %}
+                            </ul>
+                        </details>
+                    {% endif %}
+                    {% if job.diff %}
+                        <details>
+                            <summary>Proposed diff</summary>
+                            <pre>{{ job.diff }}</pre>
+                        </details>
+                    {% endif %}
+                    {% if job.agent_output %}
+                        <details>
+                            <summary>Agent output</summary>
+                            <pre>{{ job.agent_output }}</pre>
+                        </details>
+                    {% endif %}
+                    {% if job.error %}<p class="error">{{ job.error }}</p>{% endif %}
+                    <div class="job-actions">
+                        {% if job.status == "awaiting_review" %}
+                            <form action="/jobs/{{ job.id }}/approve" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit">Approve</button>
+                            </form>
+                        {% endif %}
+                        {% if job.status in ["queued", "running"] %}
+                            <form action="/jobs/{{ job.id }}/cancel" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="secondary">Cancel</button>
+                            </form>
+                        {% endif %}
+                        {% if job.status in ["failed", "cancelled"] %}
+                            <form action="/jobs/{{ job.id }}/retry" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="secondary">Retry</button>
+                            </form>
+                        {% endif %}
+                    </div>
+                </article>
+            {% endfor %}
+        {% else %}
+            <p class="muted">No agent jobs yet.</p>
+        {% endif %}
+    </section>
 </section>
 {% endblock %}

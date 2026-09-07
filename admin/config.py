@@ -21,6 +21,11 @@ class Settings:
     csrf_cookie_name: str = "autowebsite_csrf"
     csrf_max_age_seconds: int = 8 * 60 * 60
     secure_cookies: bool = os.getenv("AUTOWEBSITE_SECURE_COOKIES", "true").lower() != "false"
+    agent_enabled: bool = os.getenv("AUTOWEBSITE_AGENT_ENABLED", "false").lower() == "true"
+    agent_command: str = os.getenv("AUTOWEBSITE_AGENT_COMMAND", "codex")
+    agent_model: str = os.getenv("AUTOWEBSITE_AGENT_MODEL", "gpt-5.6-terra")
+    agent_timeout_seconds: int = int(os.getenv("AUTOWEBSITE_AGENT_TIMEOUT_SECONDS", "900"))
+    max_agent_output_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_AGENT_OUTPUT_BYTES", "1048576"))
 
     @property
     def templates_dir(self) -> Path:
@@ -53,6 +58,20 @@ class Settings:
     @property
     def starter_site_dir(self) -> Path:
         return self.project_root / "website"
+
+    @property
+    def workspaces_root(self) -> Path:
+        configured_path = os.getenv("AUTOWEBSITE_WORKSPACES_ROOT")
+        return Path(configured_path) if configured_path else self.project_root / "workspaces"
+
+    @property
+    def staging_root(self) -> Path:
+        configured_path = os.getenv("AUTOWEBSITE_STAGING_ROOT")
+        return Path(configured_path) if configured_path else self.project_root / "staging"
+
+    @property
+    def prompts_dir(self) -> Path:
+        return self.project_root / "prompts"
 
     @property
     def default_website_directory(self) -> Path:

@@ -52,6 +52,28 @@ secret manager, not a raw GitHub token. The initial settings are used only if no
 record exists; create additional website/admin records through an operational migration
 or administration workflow once that is added.
 
+## Agent jobs
+
+The dashboard persists one agent job at a time. Jobs use Codex CLI by default and run
+in a copied workspace under `workspaces/`, so an agent cannot modify the source checkout
+or public release directly. Approval copies a reviewed workspace into the private,
+cumulative `staging/` revision. New jobs start from that staging revision; production
+is still unchanged until the later validation/publishing phases.
+
+Agent execution is disabled by default. Enable it only after configuring Codex CLI
+authentication and a pinned model (use a deployment-approved model snapshot when one
+is available):
+
+```bash
+export AUTOWEBSITE_AGENT_ENABLED="true"
+export AUTOWEBSITE_AGENT_MODEL="gpt-5.6-terra"
+export AUTOWEBSITE_AGENT_TIMEOUT_SECONDS="900"
+```
+
+The integration runs `codex exec` with the `workspace-write` sandbox and never passes
+administrator prompts through a shell. Phase 10 adds the required OS/container isolation
+and resource controls for production deployment.
+
 Generate a bcrypt hash without storing the plaintext password:
 
 ```bash

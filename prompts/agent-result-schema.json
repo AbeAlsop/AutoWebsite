@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changed_files", "validation_commands"],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "validation_commands": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

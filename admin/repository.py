@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +24,23 @@ class Admin:
     username: str
     password_hash: str
     website_id: int
+
+
+@dataclass(frozen=True)
+class Job:
+    id: str
+    website_id: int
+    prompt: str
+    status: str
+    created_at: int
+    started_at: int | None
+    completed_at: int | None
+    agent_output: str | None
+    error: str | None
+    changed_files: tuple[str, ...]
+    diff: str | None
+    workspace_directory: Path | None
+    model: str | None
 
 
 class RepositoryConfigurationError(RuntimeError):
@@ -64,6 +84,25 @@ class RepositoryStore:
                     website_id INTEGER NOT NULL,
                     FOREIGN KEY (website_id) REFERENCES websites(id) ON DELETE RESTRICT
                 );
+
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    website_id INTEGER NOT NULL,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    started_at INTEGER,
+                    completed_at INTEGER,
+                    agent_output TEXT,
+                    error TEXT,
+                    changed_files TEXT NOT NULL DEFAULT '[]',
+                    diff TEXT,
+                    workspace_directory TEXT,
+                    model TEXT,
+                    FOREIGN KEY (website_id) REFERENCES websites(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS jobs_by_status_created_at
+                    ON jobs(status, created_at);
                 """
             )
 
@@ -122,6 +161,151 @@ class RepositoryStore:
             ).fetchone()
         return None if row is None else Admin(**dict(row))
 
+    def create_job(self, website_id: int, prompt: str, model: str) -> Job:
+        job_id = uuid.uuid4().hex
+        created_at = int(time.time())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO jobs (id, website_id, prompt, status, created_at, model)
+                VALUES (?, ?, ?, 'queued', ?, ?)
+                """,
+                (job_id, website_id, prompt, created_at, model),
+            )
+        job = self.get_job(job_id, website_id)
+        if job is None:
+            raise RepositoryConfigurationError("The newly created job could not be read.")
+        return job
+
+    def get_job(self, job_id: str, website_id: int) -> Job | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
+                       agent_output, error, changed_files, diff, workspace_directory, model
+                FROM jobs WHERE id = ? AND website_id = ?
+                """,
+                (job_id, website_id),
+            ).fetchone()
+        return None if row is None else self._job_from_row(row)
+
+    def list_jobs(self, website_id: int, limit: int = 20) -> list[Job]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
+                       agent_output, error, changed_files, diff, workspace_directory, model
+                FROM jobs WHERE website_id = ? ORDER BY created_at DESC LIMIT ?
+                """,
+                (website_id, limit),
+            ).fetchall()
+        return [self._job_from_row(row) for row in rows]
+
+    def claim_next_job(self, website_id: int) -> Job | None:
+        """Atomically claim one queued job, preserving single-site job serialization."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE website_id = ? AND status = 'queued'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs AS pending_review
+                      WHERE pending_review.website_id = jobs.website_id
+                        AND pending_review.status = 'awaiting_review'
+                  )
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (website_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            started_at = int(time.time())
+            connection.execute(
+                "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
+                (started_at, row["id"]),
+            )
+            claimed = connection.execute(
+                """
+                SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
+                       agent_output, error, changed_files, diff, workspace_directory, model
+                FROM jobs WHERE id = ?
+                """,
+                (row["id"],),
+            ).fetchone()
+            connection.commit()
+        return self._job_from_row(claimed)
+
+    def complete_job(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        agent_output: str | None = None,
+        error: str | None = None,
+        changed_files: list[str] | None = None,
+        diff: str | None = None,
+        workspace_directory: Path | None = None,
+    ) -> None:
+        if status not in {"awaiting_review", "failed", "cancelled"}:
+            raise ValueError(f"Unsupported final job status: {status}")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, completed_at = ?, agent_output = ?, error = ?, changed_files = ?,
+                    diff = ?, workspace_directory = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    int(time.time()),
+                    agent_output,
+                    error,
+                    json.dumps(changed_files or []),
+                    diff,
+                    None if workspace_directory is None else str(workspace_directory),
+                    job_id,
+                ),
+            )
+
+    def request_cancel(self, job_id: str, website_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = CASE WHEN status = 'running' THEN 'cancel_requested' ELSE 'cancelled' END,
+                    completed_at = CASE WHEN status = 'queued' THEN ? ELSE completed_at END
+                WHERE id = ? AND website_id = ? AND status IN ('queued', 'running')
+                """,
+                (int(time.time()), job_id, website_id),
+            )
+        return cursor.rowcount == 1
+
+    def approve_job(self, job_id: str, website_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status = 'approved'
+                WHERE id = ? AND website_id = ? AND status = 'awaiting_review'
+                """,
+                (job_id, website_id),
+            )
+        return cursor.rowcount == 1
+
+    def recover_interrupted_jobs(self, website_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed', completed_at = ?,
+                    error = 'The service restarted before this agent job completed.'
+                WHERE website_id = ? AND status IN ('running', 'cancel_requested')
+                """,
+                (int(time.time()), website_id),
+            )
+
     def get_website_for_admin(self, username: str, website_id: int | None = None) -> Website | None:
         """Return only the website assigned to this admin, never a client path."""
         query = """
@@ -167,3 +351,11 @@ class RepositoryStore:
         values = dict(row)
         values["working_directory"] = Path(values["working_directory"])
         return Website(**values)
+
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> Job:
+        values = dict(row)
+        values["changed_files"] = tuple(json.loads(values["changed_files"]))
+        if values["workspace_directory"] is not None:
+            values["workspace_directory"] = Path(values["workspace_directory"])
+        return Job(**values)

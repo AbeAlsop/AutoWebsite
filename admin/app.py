@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 from typing import Annotated
+from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
 from .csrf import create_csrf_token, validate_csrf_token
-from .repository import Admin, RepositoryStore, Website
+from .agent import JobRunner
+from .repository import Admin, Job, RepositoryStore, Website
 from .site import SingleSitePublisher
 
 app = FastAPI(title=settings.app_name)
 repository_store = RepositoryStore(settings.database_path)
+job_runner = JobRunner(repository_store, settings)
 
 templates = Jinja2Templates(directory=str(settings.templates_dir))
 
@@ -40,6 +43,12 @@ async def initialize_repository_store() -> None:
         source_directory=website.working_directory,
         starter_site_directory=settings.starter_site_dir,
     ).initialize()
+    await job_runner.start(website)
+
+
+@app.on_event("shutdown")
+async def stop_job_runner() -> None:
+    await job_runner.stop()
 
 
 def get_session_admin(request: Request) -> Admin | None:
@@ -65,6 +74,19 @@ def get_authorized_website(admin: Admin) -> Website:
     if website is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Website access denied")
     return website
+
+
+def get_authorized_job(admin: Admin, job_id: str) -> Job:
+    job = repository_store.get_job(job_id, admin.website_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+def get_staging_directory() -> Path:
+    if job_runner.staging_area is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Staging is initializing")
+    return job_runner.staging_area.current_revision().directory
 
 
 def require_csrf(request: Request, csrf_token: str | None) -> None:
@@ -182,7 +204,13 @@ async def dashboard(request: Request) -> HTMLResponse:
     return render_template_with_csrf(
         request,
         "dashboard.html",
-        {"app_name": settings.app_name, "username": admin.username, "website": website},
+        {
+            "app_name": settings.app_name,
+            "username": admin.username,
+            "website": website,
+            "jobs": repository_store.list_jobs(website.id),
+            "staging_revision": get_staging_directory().name,
+        },
     )
 
 
@@ -191,21 +219,13 @@ async def submit_prompt(
     request: Request,
     prompt: Annotated[str, Form()],
     csrf_token: Annotated[str | None, Form()] = None,
-) -> JSONResponse:
+) -> RedirectResponse:
     admin = require_admin(request)
     require_csrf(request, csrf_token)
     website = get_authorized_website(admin)
-    # Phase 9 connects this endpoint to the coding agent.
-    return JSONResponse(
-        {
-            "status": "accepted",
-            "prompt": prompt,
-            "website_id": website.id,
-            "website_name": website.name,
-            "message": "Prompt received. Agent execution is not enabled yet.",
-        },
-        status_code=202,
-    )
+    job = repository_store.create_job(website.id, prompt, settings.agent_model)
+    job_runner.wake()
+    return RedirectResponse(url=f"/dashboard#job-{job.id}", status_code=303)
 
 
 @app.post("/upload")
@@ -243,6 +263,114 @@ async def history(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/jobs/{job_id}")
+async def job_status(request: Request, job_id: str) -> dict[str, object]:
+    admin = require_admin(request)
+    job = get_authorized_job(admin, job_id)
+    return serialize_job(job)
+
+
+@app.get("/jobs/{job_id}/preview")
+async def preview_directory_redirect(request: Request, job_id: str) -> RedirectResponse:
+    admin = require_admin(request)
+    job = get_authorized_job(admin, job_id)
+    if job.workspace_directory is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview is not available")
+    if job.status not in {"awaiting_review", "approved"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Preview is not available for this job")
+    return RedirectResponse(url=f"/jobs/{job_id}/preview/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@app.get("/jobs/{job_id}/preview/", response_class=HTMLResponse)
+@app.get("/jobs/{job_id}/preview/{asset_path:path}")
+async def job_preview(request: Request, job_id: str, asset_path: str = "") -> Response:
+    admin = require_admin(request)
+    job = get_authorized_job(admin, job_id)
+    if job.workspace_directory is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview is not available")
+    if job.status not in {"awaiting_review", "approved"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Preview is not available for this job")
+    return serve_preview_file(job.workspace_directory, asset_path)
+
+
+@app.get("/staging/preview")
+async def staging_preview_directory_redirect(request: Request) -> RedirectResponse:
+    require_admin(request)
+    return RedirectResponse(url="/staging/preview/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@app.get("/staging/preview/", response_class=HTMLResponse)
+@app.get("/staging/preview/{asset_path:path}")
+async def staging_preview(request: Request, asset_path: str = "") -> Response:
+    require_admin(request)
+    return serve_preview_file(get_staging_directory(), asset_path)
+
+
+def serve_preview_file(directory: Path, asset_path: str) -> Response:
+    root = directory.resolve(strict=True)
+    requested = (root / asset_path).resolve(strict=False)
+    try:
+        requested.relative_to(root)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found") from error
+    if requested.is_dir():
+        requested = requested / "index.html"
+    if any(part in {".env", ".env.local", ".git", ".ssh"} for part in requested.relative_to(root).parts):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
+    if not requested.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
+    return FileResponse(requested, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/jobs/{job_id}/approve")
+async def approve_job(
+    request: Request,
+    job_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    job = get_authorized_job(admin, job_id)
+    if job.status != "awaiting_review" or job.workspace_directory is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
+    if job_runner.staging_area is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Staging is initializing")
+    job_runner.staging_area.apply_workspace(job.workspace_directory)
+    if not repository_store.approve_job(job_id, admin.website_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
+    job_runner.wake()
+    return RedirectResponse(url=f"/dashboard#job-{job_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def cancel_job(
+    request: Request,
+    job_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    if not repository_store.request_cancel(job_id, admin.website_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job cannot be cancelled")
+    return RedirectResponse(url=f"/dashboard#job-{job_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/retry")
+async def retry_job(
+    request: Request,
+    job_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    previous = get_authorized_job(admin, job_id)
+    if previous.status not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only failed or cancelled jobs can be retried")
+    job = repository_store.create_job(admin.website_id, previous.prompt, settings.agent_model)
+    job_runner.wake()
+    return RedirectResponse(url=f"/dashboard#job-{job.id}", status_code=303)
+
+
 @app.post("/rollback")
 async def rollback(
     request: Request,
@@ -267,6 +395,20 @@ async def rollback(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def serialize_job(job: Job) -> dict[str, object]:
+    return {
+        "id": job.id,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "changed_files": list(job.changed_files),
+        "error": job.error,
+        "model": job.model,
+        "preview_url": None if job.workspace_directory is None else f"/jobs/{job.id}/preview",
+    }
 
 
 # This route is deliberately registered last: the public static site is a fallback
