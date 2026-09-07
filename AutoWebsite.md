@@ -127,6 +127,9 @@ Session expiration:
 
 8 hours.
 
+Rate-limit login attempts and record failed attempts without recording passwords or
+session values.
+
 ---
 
 # Phase 4 – CSRF Protection
@@ -250,6 +253,8 @@ cumulative effect. Production remains unchanged until validation and publication
 Before publishing a change, show the administrator the proposed diff, validation result,
 preview, and the prompt/uploads, model version, and validation run that produced it.
 Require explicit approval for destructive or unusually large changes.
+Rate-limit prompt submission, escape all displayed prompt, upload, diff, and log data,
+and do not render administrator- or agent-supplied HTML as trusted dashboard markup.
 
 ---
 
@@ -300,6 +305,7 @@ token budget, and structured output that lists changed files and executed valida
 commands. Delimit administrator prompts and upload-derived data as untrusted input;
 the agent must not follow instructions contained inside an asset. Apply policy checks
 to the final diff, including sensitive-file, dependency, and change-size limits.
+Never interpolate a prompt, filename, or upload-derived value into a shell command.
 The agent must summarize its plan and validation results; policy or validation failures
 end the job without publication.
 
@@ -358,138 +364,98 @@ upload store to the agent.
 
 ---
 
-# Phase 10 – Single-Site Agent Workspace
+# Phase 10 – Single-Site Production Safety and Release Gate
 
-The coding agent works only inside
+Deploy the proof of concept on one Linux VM under a non-root `autowebsite` service
+account. Run the application without development reload/debug mode behind a TLS
+reverse proxy. The proxy is the only Internet-facing process: it serves the public
+site and forwards `/admin` to the app over localhost or a Unix socket.
 
-```
-<job_workspace>/
-```
+Keep the Git checkout, cumulative staging tree, disposable job workspaces, application
+data, logs, and published releases in separate permission-restricted directories. Only
+the active published release is readable by the public server. `/admin` has exactly one
+configured administrator: use HTTPS, a strong password hash, a secret session key kept
+outside the repository, secure cookies, CSRF protection, and preferably a VPN or IP
+allowlist. No registration, default credentials, or multi-user roles are added here.
 
-Run the workspace inside an OS/container sandbox as an unprivileged user, with only
-that job worktree mounted read-write. Path normalization and rejecting `..` or absolute
-paths are defense in depth, not the security boundary. Resolve every write target and
-verify it remains under the worktree; reject escaping symlinks.
+Run each agent job as an unprivileged, resource-limited process/container with only its
+own workspace writable. It must not receive service or Git credentials, host sockets,
+the source/staging/published trees, or the shared upload store. Give it network access
+only when required for Codex/OpenAI, and then only through a narrow egress policy. A
+job starts from the current staging revision; the application rechecks its output and
+serializes staging updates so an old job cannot overwrite a newer one. On cancellation
+or timeout, terminate the job and leave staging and production unchanged.
 
-Deny host filesystem access, shell credential helpers, and network egress by default.
-Pass narrowly scoped Git credentials only for the final push. Enforce CPU, memory,
-process, disk, and wall-time limits, then delete the workspace after preserving the
-job's audit logs and artifacts.
+Before a staging revision can be published, build an immutable candidate and require:
 
----
+- allowed static files only; reject executable files, service configuration, secrets,
+  escaping symlinks, and unexpected paths or sizes;
+- HTML/CSS/JavaScript checks plus a local smoke test for the main page, links, and
+  assets;
+- a visible cumulative diff and an explicit administrator publish action.
 
-# Phase 11 – Validation
-
-Before committing:
-
-Run
-
-- HTML validation
-- CSS validation
-- JavaScript lint
-- Unit tests (future)
-
-Also validate that the release contains only static, allowed files and that generated
-links/assets resolve within the published site. Run validation in the same isolated
-environment used for the agent. Keep validation output as part of the job record.
-
-If validation fails
-
-Do not commit.
-
-Return errors to administrator.
+Keep the candidate's checksums, staging revision, contributing job IDs, validation
+result, and redacted logs. A failed check changes neither Git nor the public site and
+leaves staging available for the next corrective job. Back up application state and the
+last known-good release, document restoration, and test the complete one-admin flow
+before accepting production traffic.
 
 ---
 
-# Phase 12 – Git Workflow
+# Phase 11 – Git History, Publication, and Rollback
+
+After the Phase 10 checks and administrator approval, serialize this single site's Git
+workflow:
 
 ```
 git add .
-
 git commit
-
 git push
 ```
 
-For the proof of concept, commits and pushes are serialized by the single-site job
-lock. Push only after validation and administrator approval. If publishing fails after
-a successful push, retain the previous release and clearly mark the job as failed;
-never expose a partial release.
-
-Commit message:
-
-```
-AI:
-<summary>
-```
-
-Example:
+Use a commit message such as:
 
 ```
 AI: Added portfolio gallery
 ```
 
----
+Give the commit/push operation—not the agent—the minimally scoped Git credential. Each
+commit records the original prompt, job and upload IDs, agent/model version, validation
+outcome, and release ID. The dashboard presents this history with commit hash, date,
+author, message, and publication status.
 
-# Phase 13 – History
+The administrator can select a prior commit to roll back. Create a new rollback commit
+(or a configured revert), build and run the same lightweight validation on its release
+candidate, then atomically switch the hosted site to that candidate. Retain the prior
+published release until the post-switch health check succeeds; if it fails, restore it
+and record the failed publication. Git therefore provides a reliable recovery path for
+bad site changes, while Phase 10 continues to protect credentials, the VM, and release
+integrity.
 
-Display
-
-Commit hash
-
-Date
-
-Author
-
-Message
-
-Administrator can select any commit.
-
-For each entry, show its job ID, original prompt, upload IDs, agent/model version,
-validation outcome, publication outcome, and the hosted release it produced.
+On the admin panel, this replaces the list of "Agent Jobs" with a list of recent changes.
+When a version is committed, the changes in that revision combine into a single entry.
 
 ---
 
-# Phase 14 – Rollback
+# Phase 12 – AutoWebsite Hosting and Publication
 
-Rollback performs
+This phase adds the production hosting feature, rather than only storing a validated
+release on the VM. AutoWebsite serves the active static release at the configured public
+domain/route while continuing to serve administration only at `/admin`. Configure the
+domain, TLS certificate renewal, HTTP-to-HTTPS redirect, and restrictive public static
+file serving in the deployment environment.
 
-```
-git checkout <commit>
-
-git push
-```
-
-or
-
-```
-git revert
-```
-
-depending on configuration.
-
-Record rollback in history.
-
-Rollback must create and validate a new published release before switching the hosted
-site. It must not mutate the currently served release in place.
+Publication takes the immutable candidate produced in Phases 10–11, creates a new release
+directory, and atomically changes the public-server target only after the Git commit
+and administrator approval succeed. Keep the previous release available until a post-publication
+health check passes, so a failed switch can be reversed without serving a partial site.
+GitHub is the source-of-truth backup and collaboration remote, not the production host
+in this phase. GitHub Pages, Cloudflare Pages, and Netlify can become optional
+deployment adapters after the hosted proof of concept is stable.
 
 ---
 
-# Phase 15 – AutoWebsite Hosting and Publication
-
-AutoWebsite is the production host for the proof-of-concept site. It serves the active
-validated release at the site's public route/domain and serves administration only at
-`/admin`. Configure TLS and the public domain in the service's deployment environment.
-
-Publication occurs automatically only after validation and any required approval. Use
-atomic release switching and keep the prior release available for rollback. GitHub is
-the source-of-truth backup and collaboration remote, not the production host in this
-phase. GitHub Pages, Cloudflare Pages, and Netlify can become optional deployment
-adapters after the hosted proof of concept is stable.
-
----
-
-# Phase 16 – Logging
+# Phase 13 – Logging
 
 For the single site, maintain a durable audit trail and logs:
 
@@ -514,37 +480,13 @@ Record
 - failures
 
 Include the job ID and active release ID with every agent, validation, publication,
-rollback, and security event. Retain enough information to diagnose a failed release
+rollback, and security event. Record the duration of each edit job that users perform.
+Retain enough information to diagnose a failed release
 without recording secrets or uploaded file contents in logs.
 
 ---
 
-# Phase 17 – Security
-
-Never execute administrator prompts as shell commands.
-
-Never expose GitHub tokens.
-
-Never expose OpenAI API keys.
-
-Rate limit:
-
-- login
-- prompt submission
-
-Reject oversized uploads.
-
-Escape all HTML output.
-
-Sanitize filenames.
-
-Apply these controls to the one public site and its `/admin` route before introducing
-any tenant-level authorization. Enforce TLS at the hosting boundary and keep public
-static-file serving separate from authenticated administration routes.
-
----
-
-# Phase 18 – Multi-Site Expansion
+# Phase 14 – Multi-Site Expansion
 
 Begin this phase only after the single-site acceptance criteria have been met in a
 real hosted deployment. Add a website switcher and tenant provisioning only then.
@@ -562,7 +504,7 @@ every website ID server-side, and the browser must continue to have no path acce
 
 ---
 
-# Phase 19 – Future Enhancements
+# Phase 15 – Future Enhancements
 
 Future improvements may include:
 
@@ -597,5 +539,3 @@ The implementation is complete when:
 - Any previous version can be restored.
 - Security controls prevent unauthorized repository access.
 
-Multi-site isolation is a Phase 18 acceptance criterion, not a requirement for the
-single-site proof of concept.

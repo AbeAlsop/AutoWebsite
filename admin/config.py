@@ -26,6 +26,13 @@ class Settings:
     agent_model: str = os.getenv("AUTOWEBSITE_AGENT_MODEL", "gpt-5.6-terra")
     agent_timeout_seconds: int = int(os.getenv("AUTOWEBSITE_AGENT_TIMEOUT_SECONDS", "900"))
     max_agent_output_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_AGENT_OUTPUT_BYTES", "1048576"))
+    max_upload_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+    max_upload_count: int = int(os.getenv("AUTOWEBSITE_MAX_UPLOAD_COUNT", "100"))
+    max_zip_entries: int = int(os.getenv("AUTOWEBSITE_MAX_ZIP_ENTRIES", "100"))
+    max_zip_uncompressed_bytes: int = int(
+        os.getenv("AUTOWEBSITE_MAX_ZIP_UNCOMPRESSED_BYTES", str(50 * 1024 * 1024))
+    )
+    upload_malware_scan_command: str = os.getenv("AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND", "clamscan")
 
     @property
     def templates_dir(self) -> Path:
@@ -68,6 +75,11 @@ class Settings:
     def staging_root(self) -> Path:
         configured_path = os.getenv("AUTOWEBSITE_STAGING_ROOT")
         return Path(configured_path) if configured_path else self.project_root / "staging"
+
+    @property
+    def uploads_root(self) -> Path:
+        configured_path = os.getenv("AUTOWEBSITE_UPLOADS_ROOT")
+        return Path(configured_path) if configured_path else self.project_root / "uploads"
 
     @property
     def prompts_dir(self) -> Path:

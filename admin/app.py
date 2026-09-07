@@ -12,12 +12,15 @@ from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
 from .csrf import create_csrf_token, validate_csrf_token
 from .agent import JobRunner
-from .repository import Admin, Job, RepositoryStore, Website
-from .site import SingleSitePublisher
+from .repository import Admin, Job, RepositoryConfigurationError, RepositoryStore, Website
+from .site import SingleSitePublisher, SiteLayoutError
+from .uploads import UploadManager, UploadRejected
 
 app = FastAPI(title=settings.app_name)
 repository_store = RepositoryStore(settings.database_path)
 job_runner = JobRunner(repository_store, settings)
+upload_manager = UploadManager(repository_store, settings)
+publisher: SingleSitePublisher | None = None
 
 templates = Jinja2Templates(directory=str(settings.templates_dir))
 
@@ -26,6 +29,7 @@ app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="stat
 
 @app.on_event("startup")
 async def initialize_repository_store() -> None:
+    global publisher
     repository_store.initialize(
         bootstrap_username=settings.admin_username,
         bootstrap_password_hash=settings.admin_password_hash,
@@ -37,12 +41,13 @@ async def initialize_repository_store() -> None:
     website = repository_store.get_active_website()
     if website is None:
         raise RuntimeError("No active website is configured.")
-    SingleSitePublisher(
+    publisher = SingleSitePublisher(
         repositories_root=settings.repositories_root,
         published_root=settings.published_root,
         source_directory=website.working_directory,
         starter_site_directory=settings.starter_site_dir,
-    ).initialize()
+    )
+    publisher.initialize()
     await job_runner.start(website)
 
 
@@ -201,6 +206,13 @@ async def logout(request: Request, csrf_token: Annotated[str | None, Form()] = N
 async def dashboard(request: Request) -> HTMLResponse:
     admin = require_admin(request)
     website = get_authorized_website(admin)
+    jobs = repository_store.list_jobs(website.id)
+    staging_directory = get_staging_directory()
+    uploads = repository_store.list_uploads(website.id)
+    upload_usage = {
+        upload.id: upload_manager.upload_usage(upload.id, website.id)
+        for upload in uploads
+    }
     return render_template_with_csrf(
         request,
         "dashboard.html",
@@ -208,8 +220,17 @@ async def dashboard(request: Request) -> HTMLResponse:
             "app_name": settings.app_name,
             "username": admin.username,
             "website": website,
-            "jobs": repository_store.list_jobs(website.id),
-            "staging_revision": get_staging_directory().name,
+            "review_jobs": [job for job in jobs if job.status == "awaiting_review"],
+            "active_jobs": [job for job in jobs if job.status in {"queued", "running", "cancel_requested"}],
+            "past_jobs": [
+                job
+                for job in jobs
+                if job.status not in {"awaiting_review", "queued", "running", "cancel_requested"}
+            ],
+            "uploads": uploads,
+            "upload_usage": upload_usage,
+            "staging_revision": staging_directory.name,
+            "published_release": request.query_params.get("published"),
         },
     )
 
@@ -218,14 +239,103 @@ async def dashboard(request: Request) -> HTMLResponse:
 async def submit_prompt(
     request: Request,
     prompt: Annotated[str, Form()],
+    upload_ids: Annotated[list[str] | None, Form()] = None,
+    attachment: Annotated[UploadFile | None, File()] = None,
     csrf_token: Annotated[str | None, Form()] = None,
 ) -> RedirectResponse:
     admin = require_admin(request)
     require_csrf(request, csrf_token)
     website = get_authorized_website(admin)
-    job = repository_store.create_job(website.id, prompt, settings.agent_model)
+    selected_upload_ids = tuple(dict.fromkeys(upload_ids or []))
+    try:
+        repository_store.get_approved_uploads(website.id, selected_upload_ids)
+    except RepositoryConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    if attachment is not None and attachment.filename:
+        try:
+            stored = await upload_manager.store_upload(website.id, attachment)
+        except UploadRejected as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+        selected_upload_ids = tuple(dict.fromkeys((*selected_upload_ids, stored.upload.id)))
+    elif attachment is not None:
+        await attachment.close()
+    job = repository_store.create_job(website.id, prompt, settings.agent_model, selected_upload_ids)
     job_runner.wake()
-    return RedirectResponse(url=f"/dashboard#job-{job.id}", status_code=303)
+    return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/uploads/{upload_id}/rescan")
+async def rescan_upload(
+    request: Request,
+    upload_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    try:
+        await upload_manager.rescan_upload(admin.website_id, upload_id)
+    except UploadRejected as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/uploads/{upload_id}/delete")
+async def delete_upload(
+    request: Request,
+    upload_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    upload = repository_store.get_upload(upload_id, admin.website_id)
+    if upload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    locations = upload_manager.upload_usage(upload.id, admin.website_id)
+    if locations:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Upload is in use in {', '.join(locations)} and cannot be deleted.",
+        )
+    if not upload_manager.delete_upload(admin.website_id, upload_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/jobs/{job_id}/reprompt")
+async def reprompt_job(
+    request: Request,
+    job_id: str,
+    prompt: Annotated[str, Form()],
+    attachment: Annotated[UploadFile | None, File()] = None,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    website = get_authorized_website(admin)
+    previous = get_authorized_job(admin, job_id)
+    if previous.status != "awaiting_review" or previous.workspace_directory is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft is not available for editing")
+    selected_upload_ids = previous.upload_ids
+    try:
+        repository_store.get_approved_uploads(website.id, selected_upload_ids)
+    except RepositoryConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    if attachment is not None and attachment.filename:
+        try:
+            stored = await upload_manager.store_upload(website.id, attachment)
+        except UploadRejected as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+        selected_upload_ids = tuple(dict.fromkeys((*selected_upload_ids, stored.upload.id)))
+    elif attachment is not None:
+        await attachment.close()
+    try:
+        job = repository_store.create_reprompt_job(
+            previous.id, website.id, prompt, settings.agent_model, selected_upload_ids
+        )
+    except RepositoryConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    job_runner.wake()
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @app.post("/upload")
@@ -237,18 +347,22 @@ async def upload_file(
     admin = require_admin(request)
     require_csrf(request, csrf_token)
     website = get_authorized_website(admin)
-    # Phase 7 persists uploads and records metadata.
-    contents = await file.read()
+    try:
+        stored = await upload_manager.store_upload(website.id, file)
+    except UploadRejected as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     return JSONResponse(
         {
-            "status": "accepted",
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "size": len(contents),
+            "id": stored.upload.id,
+            "status": stored.upload.status,
+            "filename": stored.upload.original_filename,
+            "content_type": stored.upload.mime_type,
+            "size": stored.upload.size,
+            "scan_status": stored.upload.scan_status,
             "website_id": website.id,
-            "message": "Upload received. Persistent storage is not enabled yet.",
+            "message": "Upload passed quarantine checks.",
         },
-        status_code=202,
+        status_code=status.HTTP_201_CREATED,
     )
 
 
@@ -306,6 +420,22 @@ async def staging_preview(request: Request, asset_path: str = "") -> Response:
     return serve_preview_file(get_staging_directory(), asset_path)
 
 
+@app.post("/staging/publish")
+async def publish_staging(
+    request: Request,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    require_admin(request)
+    require_csrf(request, csrf_token)
+    if publisher is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Publisher is initializing")
+    try:
+        release = publisher.publish_directory(get_staging_directory())
+    except (OSError, SiteLayoutError) as error:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to publish staging") from error
+    return RedirectResponse(url=f"/dashboard?published={release.release_id}", status_code=303)
+
+
 def serve_preview_file(directory: Path, asset_path: str) -> Response:
     root = directory.resolve(strict=True)
     requested = (root / asset_path).resolve(strict=False)
@@ -339,7 +469,21 @@ async def approve_job(
     if not repository_store.approve_job(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
     job_runner.wake()
-    return RedirectResponse(url=f"/dashboard#job-{job_id}", status_code=303)
+    return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/jobs/{job_id}/reject")
+async def reject_job(
+    request: Request,
+    job_id: str,
+    csrf_token: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    admin = require_admin(request)
+    require_csrf(request, csrf_token)
+    if not repository_store.reject_job(job_id, admin.website_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft is not awaiting review")
+    job_runner.wake()
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @app.post("/jobs/{job_id}/cancel")
@@ -352,7 +496,7 @@ async def cancel_job(
     require_csrf(request, csrf_token)
     if not repository_store.request_cancel(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job cannot be cancelled")
-    return RedirectResponse(url=f"/dashboard#job-{job_id}", status_code=303)
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @app.post("/jobs/{job_id}/retry")
@@ -368,7 +512,7 @@ async def retry_job(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only failed or cancelled jobs can be retried")
     job = repository_store.create_job(admin.website_id, previous.prompt, settings.agent_model)
     job_runner.wake()
-    return RedirectResponse(url=f"/dashboard#job-{job.id}", status_code=303)
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @app.post("/rollback")
@@ -405,6 +549,7 @@ def serialize_job(job: Job) -> dict[str, object]:
         "started_at": job.started_at,
         "completed_at": job.completed_at,
         "changed_files": list(job.changed_files),
+        "upload_ids": list(job.upload_ids),
         "error": job.error,
         "model": job.model,
         "preview_url": None if job.workspace_directory is None else f"/jobs/{job.id}/preview",

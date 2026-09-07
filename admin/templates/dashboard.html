@@ -5,100 +5,104 @@
     <header class="toolbar">
         <h1>{{ app_name }} Dashboard</h1>
         <p class="muted">Signed in as {{ username }} · Managing {{ website.name }}</p>
-        <form action="/logout" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit">Log out</button>
-        </form>
+        <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Log out</button></form>
     </header>
 
-    <form action="/prompt" method="post" class="stack">
+    <form action="/prompt" method="post" enctype="multipart/form-data" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>
-            Prompt
-            <textarea name="prompt" rows="8" required></textarea>
-        </label>
+        <label>Prompt<textarea name="prompt" rows="8" required></textarea></label>
+        <label>Attach a file for this prompt (optional)<input type="file" name="attachment"></label>
+        <p class="muted">The attachment is checked and, if approved, included only with this job.</p>
+        {% set approved_uploads = uploads | selectattr("status", "equalto", "approved") | list %}
+        {% if approved_uploads %}
+            <fieldset>
+                <legend>Include existing approved uploads</legend>
+                {% for upload in approved_uploads %}
+                    <label><input type="checkbox" name="upload_ids" value="{{ upload.id }}"> {{ upload.original_filename }}{% if upload.mime_type %} ({{ upload.mime_type }}){% endif %}</label>
+                {% endfor %}
+            </fieldset>
+        {% endif %}
         <button type="submit">Submit prompt</button>
     </form>
 
-    <form action="/upload" method="post" enctype="multipart/form-data" class="stack">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>
-            Upload
-            <input type="file" name="file" required>
-        </label>
-        <button type="submit">Upload file</button>
-    </form>
-
-    <p>
-        <a href="/history">View history</a>
-        · <a href="/staging/preview">Open staging preview</a>
-        <span class="muted">(revision {{ staging_revision }})</span>
-    </p>
-
-    <section class="jobs" aria-labelledby="jobs-heading">
-        <h2 id="jobs-heading">Agent jobs</h2>
-        {% if jobs %}
-            {% for job in jobs %}
+    <section aria-labelledby="staging-heading">
+        <h2 id="staging-heading">Staging</h2>
+        <p><a href="/staging/preview">Open staging preview</a> <span class="muted">(revision {{ staging_revision }})</span></p>
+        <form action="/staging/publish" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit">Publish staging revision</button>
+        </form>
+        {% if published_release %}<p class="success">Published release {{ published_release }}.</p>{% endif %}
+        {% if review_jobs or active_jobs %}
+            <h3>Unapproved edits</h3>
+            {% for job in review_jobs %}
                 <article class="job" id="job-{{ job.id }}" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
-                    <header class="job-header">
-                        <h3>
-                            <span class="job-status">{{ job.status | replace("_", " ") | title }}</span>
-                            {% if job.status in ["queued", "running"] %}
-                                <span class="job-spinner" role="status" aria-label="Agent job is running"></span>
-                            {% endif %}
-                        </h3>
-                        <code>{{ job.id }}</code>
-                    </header>
+                    <header class="job-header"><h4>Ready for review</h4><code>{{ job.id }}</code></header>
                     <p>{{ job.prompt }}</p>
-                    <p class="muted">Model: {{ job.model }} · Changed files: {{ job.changed_files | length }}</p>
-                    {% if job.workspace_directory %}
-                        <p><a href="/jobs/{{ job.id }}/preview">Open private preview</a></p>
-                    {% endif %}
-                    {% if job.changed_files %}
-                        <details>
-                            <summary>Changed files</summary>
-                            <ul>
-                                {% for file in job.changed_files %}<li><code>{{ file }}</code></li>{% endfor %}
-                            </ul>
-                        </details>
-                    {% endif %}
-                    {% if job.diff %}
-                        <details>
-                            <summary>Proposed diff</summary>
-                            <pre>{{ job.diff }}</pre>
-                        </details>
-                    {% endif %}
-                    {% if job.agent_output %}
-                        <details>
-                            <summary>Agent output</summary>
-                            <pre>{{ job.agent_output }}</pre>
-                        </details>
-                    {% endif %}
+                    {% if job.workspace_directory %}<p><a href="/jobs/{{ job.id }}/preview">Open draft preview</a></p>{% endif %}
+                    {% if job.changed_files %}<details><summary>Changed files</summary><ul>{% for file in job.changed_files %}<li><code>{{ file }}</code></li>{% endfor %}</ul></details>{% endif %}
+                    {% if job.diff %}<details><summary>Proposed diff</summary><pre>{{ job.diff }}</pre></details>{% endif %}
                     {% if job.error %}<p class="error">{{ job.error }}</p>{% endif %}
                     <div class="job-actions">
-                        {% if job.status == "awaiting_review" %}
-                            <form action="/jobs/{{ job.id }}/approve" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit">Approve</button>
-                            </form>
-                        {% endif %}
-                        {% if job.status in ["queued", "running"] %}
-                            <form action="/jobs/{{ job.id }}/cancel" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="secondary">Cancel</button>
-                            </form>
-                        {% endif %}
-                        {% if job.status in ["failed", "cancelled"] %}
-                            <form action="/jobs/{{ job.id }}/retry" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="secondary">Retry</button>
-                            </form>
-                        {% endif %}
+                        <form action="/jobs/{{ job.id }}/approve" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Approve</button></form>
+                        <form action="/jobs/{{ job.id }}/reject" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="secondary">Reject</button></form>
                     </div>
+                    <form action="/jobs/{{ job.id }}/reprompt" method="post" enctype="multipart/form-data" class="stack">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <label>Edit this draft before approving<textarea name="prompt" rows="4" required></textarea></label>
+                        <label>Attach another file (optional)<input type="file" name="attachment"></label>
+                        <button type="submit" class="secondary">Update draft</button>
+                    </form>
+                </article>
+            {% endfor %}
+            {% for job in active_jobs %}
+                <article class="job" id="job-{{ job.id }}" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+                    <header class="job-header"><h4>{{ job.status | replace("_", " ") | title }}</h4><span class="job-spinner" role="status" aria-label="Agent job is running"></span></header>
+                    <p>{{ job.prompt }}</p>
                 </article>
             {% endfor %}
         {% else %}
-            <p class="muted">No agent jobs yet.</p>
+            <p class="muted">No unapproved edits. Staging contains the cumulative approved changes.</p>
+        {% endif %}
+    </section>
+
+    <section aria-labelledby="uploads-heading">
+        <h2 id="uploads-heading">Uploads</h2>
+        <form id="upload-form" action="/upload" method="post" enctype="multipart/form-data" class="stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>Upload a file for a later prompt<input type="file" name="file" required></label>
+            <button type="submit">Upload file</button>
+        </form>
+        <p id="upload-result" class="muted" role="status"></p>
+        {% if uploads %}
+            <ul>
+                {% for upload in uploads %}
+                    {% set locations = upload_usage.get(upload.id, ()) %}
+                    {% set warning = "Delete this upload?" %}
+                    {% if locations %}{% set warning = "This upload is attached to " ~ locations | join(", ") ~ " and cannot be deleted until that job finishes." %}{% endif %}
+                    <li>
+                        {{ upload.original_filename }} · {{ upload.status }}{% if upload.mime_type %} · {{ upload.mime_type }}{% endif %}{% if upload.width and upload.height %} · {{ upload.width }}×{{ upload.height }}{% endif %}
+                        {% if locations %}<span class="upload-warning"> · Attached to {{ locations | join(", ") }}; cannot delete</span>{% endif %}
+                        {% if upload.error %}<span class="error"> · {{ upload.error }}</span>{% endif %}
+                        {% if upload.error in ["Malware scanner is unavailable; upload remains quarantined.", "Malware scanner timed out; upload remains quarantined."] %}
+                            <form action="/uploads/{{ upload.id }}/rescan" method="post" style="display: inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="secondary">Rescan</button></form>
+                        {% endif %}
+                        <form class="delete-upload-form" action="/uploads/{{ upload.id }}/delete" method="post" data-warning="{{ warning }}" data-in-use="{{ 'true' if locations else 'false' }}" style="display: inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="delete-upload-button" aria-label="Delete {{ upload.original_filename }}" title="Delete upload">×</button></form>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}<p class="muted">No uploads yet.</p>{% endif %}
+    </section>
+
+    <section class="jobs" aria-labelledby="history-heading">
+        <h2 id="history-heading">Past edits</h2>
+        <p><a href="/history">View Git history</a></p>
+        {% if past_jobs %}
+            {% for job in past_jobs %}
+                <article class="job" id="job-{{ job.id }}"><header class="job-header"><h3>{{ job.status | replace("_", " ") | title }}</h3><code>{{ job.id }}</code></header><p>{{ job.prompt }}</p>{% if job.error %}<p class="error">{{ job.error }}</p>{% endif %}</article>
+            {% endfor %}
+        {% else %}
+            <p class="muted">No past edits yet.</p>
         {% endif %}
     </section>
 </section>

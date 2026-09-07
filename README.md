@@ -47,6 +47,27 @@ On first startup, AutoWebsite copies the bundled starter site into an empty acti
 source directory and publishes an initial immutable release. It serves that release at
 `/`; the mutable source checkout and agent workspaces are never publicly served.
 
+## Uploads
+
+Uploads are stored outside the site repository under a generated ID, never under a
+browser-provided filename or path. AutoWebsite streams each file into quarantine,
+enforces the configured size/count/type limits, sniffs the content type, inspects ZIP
+archives, and requires a passing malware scan before marking it approved. Configure a
+scanner available on the server; the default command is `clamscan` and uploads fail
+closed if it is unavailable:
+
+```bash
+export AUTOWEBSITE_UPLOADS_ROOT="/srv/autowebsites-uploads"
+export AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND="clamscan"
+export AUTOWEBSITE_MAX_UPLOAD_BYTES="10485760"
+```
+
+Approved uploads receive a SHA-256 checksum, a versioned `manifest.json`, and, for
+images, dimensions plus the site-level `gallery.json` manifest. The agent must receive
+only approved job-specific copies and metadata, not this shared upload store.
+The dashboard also accepts an optional attachment with a prompt; after it passes the
+same checks, AutoWebsite automatically associates it with that new job.
+
 `AUTOWEBSITE_DEFAULT_GITHUB_TOKEN_REF` must be a reference resolved by the deployment's
 secret manager, not a raw GitHub token. The initial settings are used only if no admin
 record exists; create additional website/admin records through an operational migration

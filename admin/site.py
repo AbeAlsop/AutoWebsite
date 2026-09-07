@@ -64,8 +64,13 @@ class SingleSitePublisher:
 
     def publish(self) -> PublishedRelease:
         source = self._require_within(self.source_directory, self.repositories_root, "source directory")
+        return self.publish_directory(source)
+
+    def publish_directory(self, directory: Path) -> PublishedRelease:
+        """Publish a validated server-side directory as a new immutable release."""
+        source = directory.resolve(strict=True)
         if not source.is_dir():
-            raise SiteLayoutError("Cannot publish because the active-site source is missing.")
+            raise SiteLayoutError("Cannot publish because the release directory is missing.")
         self._validate_tree(source, source)
 
         self.releases_directory.mkdir(parents=True, exist_ok=True)

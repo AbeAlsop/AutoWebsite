@@ -41,6 +41,24 @@ class Job:
     diff: str | None
     workspace_directory: Path | None
     model: str | None
+    upload_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Upload:
+    id: str
+    website_id: int
+    original_filename: str
+    storage_path: Path
+    checksum: str | None
+    mime_type: str | None
+    size: int | None
+    width: int | None
+    height: int | None
+    scan_status: str
+    status: str
+    created_at: int
+    error: str | None
 
 
 class RepositoryConfigurationError(RuntimeError):
@@ -99,12 +117,38 @@ class RepositoryStore:
                     diff TEXT,
                     workspace_directory TEXT,
                     model TEXT,
+                    upload_ids TEXT NOT NULL DEFAULT '[]',
                     FOREIGN KEY (website_id) REFERENCES websites(id) ON DELETE RESTRICT
                 );
                 CREATE INDEX IF NOT EXISTS jobs_by_status_created_at
                     ON jobs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS uploads (
+                    id TEXT PRIMARY KEY,
+                    website_id INTEGER NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    storage_path TEXT,
+                    checksum TEXT,
+                    mime_type TEXT,
+                    size INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    scan_status TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    error TEXT,
+                    FOREIGN KEY (website_id) REFERENCES websites(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS uploads_by_website_created_at
+                    ON uploads(website_id, created_at DESC);
                 """
             )
+            job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+            if "upload_ids" not in job_columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN upload_ids TEXT NOT NULL DEFAULT '[]'")
+            upload_columns = {row["name"] for row in connection.execute("PRAGMA table_info(uploads)")}
+            if "storage_path" not in upload_columns:
+                connection.execute("ALTER TABLE uploads ADD COLUMN storage_path TEXT")
 
             # The public site can be initialized without an admin password, while
             # authentication still requires an explicitly configured password hash.
@@ -161,28 +205,171 @@ class RepositoryStore:
             ).fetchone()
         return None if row is None else Admin(**dict(row))
 
-    def create_job(self, website_id: int, prompt: str, model: str) -> Job:
+    def create_job(self, website_id: int, prompt: str, model: str, upload_ids: tuple[str, ...] = ()) -> Job:
         job_id = uuid.uuid4().hex
         created_at = int(time.time())
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO jobs (id, website_id, prompt, status, created_at, model)
-                VALUES (?, ?, ?, 'queued', ?, ?)
+                INSERT INTO jobs (id, website_id, prompt, status, created_at, model, upload_ids)
+                VALUES (?, ?, ?, 'queued', ?, ?, ?)
                 """,
-                (job_id, website_id, prompt, created_at, model),
+                (job_id, website_id, prompt, created_at, model, json.dumps(upload_ids)),
             )
         job = self.get_job(job_id, website_id)
         if job is None:
             raise RepositoryConfigurationError("The newly created job could not be read.")
         return job
 
+    def create_reprompt_job(
+        self, job_id: str, website_id: int, prompt: str, model: str, upload_ids: tuple[str, ...]
+    ) -> Job:
+        """Replace an unapproved draft with a new job based on its private workspace."""
+        next_job_id = uuid.uuid4().hex
+        created_at = int(time.time())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute(
+                """
+                SELECT workspace_directory FROM jobs
+                WHERE id = ? AND website_id = ? AND status = 'awaiting_review'
+                """,
+                (job_id, website_id),
+            ).fetchone()
+            if previous is None or previous["workspace_directory"] is None:
+                connection.rollback()
+                raise RepositoryConfigurationError("The draft is no longer available for editing.")
+            connection.execute("UPDATE jobs SET status = 'superseded' WHERE id = ?", (job_id,))
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    id, website_id, prompt, status, created_at, model, upload_ids, workspace_directory
+                ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+                """,
+                (
+                    next_job_id,
+                    website_id,
+                    prompt,
+                    created_at,
+                    model,
+                    json.dumps(upload_ids),
+                    previous["workspace_directory"],
+                ),
+            )
+            connection.commit()
+        job = self.get_job(next_job_id, website_id)
+        if job is None:
+            raise RepositoryConfigurationError("The follow-up job could not be read.")
+        return job
+
+    def create_upload(
+        self, upload_id: str, website_id: int, original_filename: str, storage_path: Path
+    ) -> Upload:
+        created_at = int(time.time())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO uploads (
+                    id, website_id, original_filename, storage_path, scan_status, status, created_at
+                ) VALUES (?, ?, ?, ?, 'pending', 'quarantined', ?)
+                """,
+                (upload_id, website_id, original_filename, str(storage_path), created_at),
+            )
+        upload = self.get_upload(upload_id, website_id)
+        if upload is None:
+            raise RepositoryConfigurationError("The newly created upload could not be read.")
+        return upload
+
+    def complete_upload(
+        self,
+        upload_id: str,
+        website_id: int,
+        *,
+        checksum: str,
+        mime_type: str,
+        size: int,
+        width: int | None,
+        height: int | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE uploads
+                SET checksum = ?, mime_type = ?, size = ?, width = ?, height = ?,
+                    scan_status = 'clean', status = 'approved', error = NULL
+                WHERE id = ? AND website_id = ? AND status IN ('quarantined', 'rejected')
+                """,
+                (checksum, mime_type, size, width, height, upload_id, website_id),
+            )
+
+    def reject_upload(self, upload_id: str, website_id: int, error: str, scan_status: str = "rejected") -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE uploads
+                SET scan_status = ?, status = 'rejected', error = ?
+                WHERE id = ? AND website_id = ? AND status = 'quarantined'
+                """,
+                (scan_status, error, upload_id, website_id),
+            )
+
+    def delete_upload(self, upload_id: str, website_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM uploads WHERE id = ? AND website_id = ?",
+                (upload_id, website_id),
+            )
+        return cursor.rowcount == 1
+
+    def get_upload(self, upload_id: str, website_id: int) -> Upload | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, website_id, original_filename, checksum, mime_type, size, width,
+                       height, scan_status, status, created_at, error, storage_path
+                FROM uploads WHERE id = ? AND website_id = ?
+                """,
+                (upload_id, website_id),
+            ).fetchone()
+        return None if row is None else self._upload_from_row(row)
+
+    def list_uploads(self, website_id: int, limit: int = 20) -> list[Upload]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, website_id, original_filename, checksum, mime_type, size, width,
+                       height, scan_status, status, created_at, error, storage_path
+                FROM uploads WHERE website_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                (website_id, limit),
+            ).fetchall()
+        return [self._upload_from_row(row) for row in rows]
+
+    def get_approved_uploads(self, website_id: int, upload_ids: tuple[str, ...]) -> list[Upload]:
+        if not upload_ids:
+            return []
+        placeholders = ", ".join("?" for _ in upload_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, website_id, original_filename, checksum, mime_type, size, width,
+                       height, scan_status, status, created_at, error, storage_path
+                FROM uploads
+                WHERE website_id = ? AND status = 'approved' AND id IN ({placeholders})
+                """,
+                (website_id, *upload_ids),
+            ).fetchall()
+        uploads = {row["id"]: self._upload_from_row(row) for row in rows}
+        if len(uploads) != len(upload_ids):
+            raise RepositoryConfigurationError("One or more selected uploads are unavailable.")
+        return [uploads[upload_id] for upload_id in upload_ids]
+
     def get_job(self, job_id: str, website_id: int) -> Job | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
-                       agent_output, error, changed_files, diff, workspace_directory, model
+                       agent_output, error, changed_files, diff, workspace_directory, model, upload_ids
                 FROM jobs WHERE id = ? AND website_id = ?
                 """,
                 (job_id, website_id),
@@ -194,12 +381,27 @@ class RepositoryStore:
             rows = connection.execute(
                 """
                 SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
-                       agent_output, error, changed_files, diff, workspace_directory, model
+                       agent_output, error, changed_files, diff, workspace_directory, model, upload_ids
                 FROM jobs WHERE website_id = ? ORDER BY created_at DESC LIMIT ?
                 """,
                 (website_id, limit),
             ).fetchall()
         return [self._job_from_row(row) for row in rows]
+
+    def has_active_job_using_upload(self, website_id: int, upload_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM jobs
+                WHERE website_id = ?
+                  AND status IN ('queued', 'running', 'cancel_requested')
+                  AND upload_ids LIKE ?
+                LIMIT 1
+                """,
+                (website_id, f'%"{upload_id}"%'),
+            ).fetchone()
+        return row is not None
 
     def claim_next_job(self, website_id: int) -> Job | None:
         """Atomically claim one queued job, preserving single-site job serialization."""
@@ -229,7 +431,7 @@ class RepositoryStore:
             claimed = connection.execute(
                 """
                 SELECT id, website_id, prompt, status, created_at, started_at, completed_at,
-                       agent_output, error, changed_files, diff, workspace_directory, model
+                       agent_output, error, changed_files, diff, workspace_directory, model, upload_ids
                 FROM jobs WHERE id = ?
                 """,
                 (row["id"],),
@@ -288,6 +490,18 @@ class RepositoryStore:
             cursor = connection.execute(
                 """
                 UPDATE jobs SET status = 'approved'
+                WHERE id = ? AND website_id = ? AND status = 'awaiting_review'
+                """,
+                (job_id, website_id),
+            )
+        return cursor.rowcount == 1
+
+    def reject_job(self, job_id: str, website_id: int) -> bool:
+        """Discard an unapproved workspace without changing the staging revision."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status = 'rejected'
                 WHERE id = ? AND website_id = ? AND status = 'awaiting_review'
                 """,
                 (job_id, website_id),
@@ -353,9 +567,16 @@ class RepositoryStore:
         return Website(**values)
 
     @staticmethod
+    def _upload_from_row(row: sqlite3.Row) -> Upload:
+        values = dict(row)
+        values["storage_path"] = Path(values["storage_path"]) if values["storage_path"] else Path()
+        return Upload(**values)
+
+    @staticmethod
     def _job_from_row(row: sqlite3.Row) -> Job:
         values = dict(row)
         values["changed_files"] = tuple(json.loads(values["changed_files"]))
+        values["upload_ids"] = tuple(json.loads(values["upload_ids"]))
         if values["workspace_directory"] is not None:
             values["workspace_directory"] = Path(values["workspace_directory"])
         return Job(**values)
