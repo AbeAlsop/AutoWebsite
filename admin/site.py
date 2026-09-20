@@ -80,18 +80,38 @@ class SingleSitePublisher:
         self.published_root.mkdir(parents=True, exist_ok=True)
         temporary = self.published_root / ".next"
         previous = self.published_root / ".previous"
-        shutil.rmtree(temporary, ignore_errors=True)
-        shutil.rmtree(previous, ignore_errors=True)
+        self._remove_release_path(temporary)
+        self._remove_release_path(previous)
         shutil.copytree(source, temporary, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_RELEASE_NAMES))
         current = self.current_release_pointer
+        moved_current = False
+        published = False
         try:
-            if current.exists():
+            if current.exists() or current.is_symlink():
                 os.replace(current, previous)
+                moved_current = True
             os.replace(temporary, current)
+            published = True
+        except OSError:
+            # If swapping in the new tree fails, restore the prior public tree
+            # before exposing the failure to the caller.
+            if moved_current and not (current.exists() or current.is_symlink()):
+                if previous.exists() or previous.is_symlink():
+                    os.replace(previous, current)
+            raise
         finally:
-            shutil.rmtree(temporary, ignore_errors=True)
-            shutil.rmtree(previous, ignore_errors=True)
+            self._remove_release_path(temporary)
+            if published:
+                self._remove_release_path(previous)
         return PublishedRelease("current", current)
+
+    @staticmethod
+    def _remove_release_path(path: Path) -> None:
+        """Remove only a publisher-owned temporary path, including old symlink pointers."""
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path)
 
     @staticmethod
     def _require_within(path: Path, root: Path, label: str) -> Path:

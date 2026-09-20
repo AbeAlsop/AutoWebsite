@@ -126,6 +126,32 @@ label {
     font-weight: 700;
 }
 
+#prompt-form textarea,
+#prompt-form input[type="file"],
+form[action$="/reprompt"] textarea {
+    font-weight: 400;
+}
+
+.prompt-attachments {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.previous-uploads {
+    min-width: 0;
+}
+
+.previous-uploads label {
+    font-weight: 400;
+}
+
+@media (max-width: 600px) {
+    .prompt-attachments {
+        grid-template-columns: 1fr;
+    }
+}
+
 fieldset label {
     align-items: center;
     display: flex;

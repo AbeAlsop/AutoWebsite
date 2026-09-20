@@ -11,17 +11,18 @@
     <form id="prompt-form" action="/prompt" method="post" enctype="multipart/form-data" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Prompt<textarea name="prompt" rows="8" required></textarea></label>
-        <label>Attach a file for this prompt (optional)<input type="file" name="attachment"></label>
-        <p class="muted">The attachment is checked and, if approved, included only with this job.</p>
         {% set approved_uploads = uploads | selectattr("status", "equalto", "approved") | list %}
-        {% if approved_uploads %}
-            <fieldset>
-                <legend>Include existing approved uploads</legend>
+        <div class="prompt-attachments">
+            <label class="new-attachment">Attach a file (optional)<input type="file" name="attachment"></label>
+            {% if approved_uploads %}
+            <fieldset class="previous-uploads">
+                <legend>Include previous uploads</legend>
                 {% for upload in approved_uploads %}
                     <label><input type="checkbox" name="upload_ids" value="{{ upload.id }}"> {{ upload.original_filename }}{% if upload.mime_type %} ({{ upload.mime_type }}){% endif %}</label>
                 {% endfor %}
             </fieldset>
-        {% endif %}
+            {% endif %}
+        </div>
         <button id="prompt-submit" type="submit">Submit prompt</button>
         <p id="prompt-result" class="muted" role="status" aria-live="polite"></p>
     </form>

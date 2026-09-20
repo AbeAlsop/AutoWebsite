@@ -425,6 +425,8 @@ async def job_preview(request: Request, job_id: str, asset_path: str = "") -> Re
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview is not available")
     if job.status not in {"awaiting_review", "approved"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Preview is not available for this job")
+    if not job.workspace_directory.is_dir() or job.workspace_directory.is_symlink():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview is no longer available")
     return serve_preview_file(job.workspace_directory, asset_path)
 
 
@@ -460,7 +462,10 @@ async def publish_staging(
 
 
 def serve_preview_file(directory: Path, asset_path: str) -> Response:
-    root = directory.resolve(strict=True)
+    try:
+        root = directory.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview is no longer available") from error
     requested = (root / asset_path).resolve(strict=False)
     try:
         requested.relative_to(root)
