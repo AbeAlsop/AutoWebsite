@@ -69,19 +69,9 @@ class Settings:
         return Path(configured_path) if configured_path else self.project_root / "workspaces"
 
     @property
-    def staging_root(self) -> Path:
-        configured_path = os.getenv("AUTOWEBSITE_STAGING_ROOT")
-        return Path(configured_path) if configured_path else self.project_root / "staging"
-
-    @property
     def uploads_root(self) -> Path:
         configured_path = os.getenv("AUTOWEBSITE_UPLOADS_ROOT")
         return Path(configured_path) if configured_path else self.project_root / "uploads"
-
-    @property
-    def logs_root(self) -> Path:
-        configured_path = os.getenv("AUTOWEBSITE_LOGS_ROOT")
-        return Path(configured_path) if configured_path else self.project_root / "logs"
 
     @property
     def prompts_dir(self) -> Path:

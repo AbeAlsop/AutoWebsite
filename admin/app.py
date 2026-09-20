@@ -13,16 +13,18 @@ from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
 from .csrf import create_csrf_token, validate_csrf_token
 from .agent import JobRunner
+from .git_site import GitSite, GitSiteError
 from .repository import Admin, Job, RepositoryConfigurationError, RepositoryStore, Website
 from .site import SingleSitePublisher, SiteLayoutError
 from .uploads import UploadManager, UploadRejected
 
 app = FastAPI(title=settings.app_name)
 repository_store = RepositoryStore(settings.database_path)
-audit_logger = AuditLogger(settings.logs_root, settings.public_site_dir)
+audit_logger = AuditLogger(settings.public_site_dir)
 job_runner = JobRunner(repository_store, settings, audit_logger)
 upload_manager = UploadManager(repository_store, settings)
 publisher: SingleSitePublisher | None = None
+git_site: GitSite | None = None
 
 templates = Jinja2Templates(directory=str(settings.templates_dir))
 
@@ -31,7 +33,7 @@ app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="stat
 
 @app.on_event("startup")
 async def initialize_repository_store() -> None:
-    global publisher
+    global publisher, git_site
     audit_logger.initialize()
     repository_store.initialize(
         bootstrap_username=settings.admin_username,
@@ -44,6 +46,9 @@ async def initialize_repository_store() -> None:
     website = repository_store.get_active_website()
     if website is None:
         raise RuntimeError("No active website is configured.")
+    if website.github_repo != "local/website":
+        git_site = GitSite(website.working_directory, website.github_repo)
+        git_site.initialize()
     publisher = SingleSitePublisher(
         repositories_root=settings.repositories_root,
         published_root=settings.published_root,
@@ -94,9 +99,9 @@ def get_authorized_job(admin: Admin, job_id: str) -> Job:
 
 
 def get_staging_directory() -> Path:
-    if job_runner.staging_area is None:
+    if job_runner.staging_directory is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Staging is initializing")
-    return job_runner.staging_area.current_revision().directory
+    return job_runner.staging_directory
 
 
 def require_csrf(request: Request, csrf_token: str | None) -> None:
@@ -237,7 +242,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             ],
             "uploads": uploads,
             "upload_usage": upload_usage,
-            "staging_revision": staging_directory.name,
+            "staging_revision": "Git staging checkout",
             "published_release": request.query_params.get("published"),
         },
     )
@@ -269,7 +274,7 @@ async def submit_prompt(
         await attachment.close()
     job = repository_store.create_job(website.id, prompt, settings.agent_model, selected_upload_ids)
     job_runner.wake()
-    audit_logger.event("web", "job_queued", website_id=website.id, actor=admin.username, job_id=job.id, upload_count=len(selected_upload_ids), model=settings.agent_model)
+    audit_logger.event("web", "job_queued", website_id=website.id, actor=admin.username, job_id=job.id, upload_count=len(selected_upload_ids), model=settings.agent_model, prompt=prompt)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -347,7 +352,7 @@ async def reprompt_job(
     except RepositoryConfigurationError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     job_runner.wake()
-    audit_logger.event("web", "job_reprompted", website_id=website.id, actor=admin.username, job_id=job.id, previous_job_id=previous.id, upload_count=len(selected_upload_ids), model=settings.agent_model)
+    audit_logger.event("web", "job_reprompted", website_id=website.id, actor=admin.username, job_id=job.id, previous_job_id=previous.id, upload_count=len(selected_upload_ids), model=settings.agent_model, prompt=prompt)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -385,10 +390,11 @@ async def upload_file(
 async def history(request: Request) -> HTMLResponse:
     admin = require_admin(request)
     website = get_authorized_website(admin)
+    commits = [] if git_site is None else git_site.history()
     return render_template_with_csrf(
         request,
         "history.html",
-        {"commits": [], "website": website},
+        {"commits": commits, "website": website},
     )
 
 
@@ -483,13 +489,18 @@ async def approve_job(
     job = get_authorized_job(admin, job_id)
     if job.status != "awaiting_review" or job.workspace_directory is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
-    if job_runner.staging_area is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Staging is initializing")
-    job_runner.staging_area.apply_workspace(job.workspace_directory)
+    if git_site is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Git staging is not configured")
+    try:
+        git_site.replace_with(job.workspace_directory)
+        commit = git_site.commit_and_push(_commit_message(job.prompt))
+    except GitSiteError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Unable to commit and push the approved edit") from error
     if not repository_store.approve_job(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not awaiting review")
+    job_runner.discard_workspace(job.workspace_directory)
     job_runner.wake()
-    audit_logger.event("web", "job_approved", website_id=admin.website_id, actor=admin.username, job_id=job_id)
+    audit_logger.event("web", "job_approved", website_id=admin.website_id, actor=admin.username, job_id=job_id, commit=commit.sha)
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
@@ -503,6 +514,8 @@ async def reject_job(
     require_csrf(request, csrf_token)
     if not repository_store.reject_job(job_id, admin.website_id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft is not awaiting review")
+    job = repository_store.get_job(job_id, admin.website_id)
+    job_runner.discard_workspace(None if job is None else job.workspace_directory)
     job_runner.wake()
     audit_logger.event("web", "job_rejected", website_id=admin.website_id, actor=admin.username, job_id=job_id)
     return RedirectResponse(url="/dashboard", status_code=303)
@@ -548,17 +561,16 @@ async def rollback(
     admin = require_admin(request)
     require_csrf(request, csrf_token)
     website = get_authorized_website(admin)
-    # Phase 14 implements rollback behavior.
-    audit_logger.event("web", "rollback_queued", website_id=website.id, actor=admin.username)
-    return JSONResponse(
-        {
-            "status": "queued",
-            "commit": commit,
-            "website_id": website.id,
-            "message": "Rollback endpoint is available; rollback execution is not enabled yet.",
-        },
-        status_code=202,
-    )
+    if git_site is None or publisher is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Git publishing is not configured")
+    try:
+        reverted = git_site.revert_and_push(commit)
+        release = publisher.publish_directory(website.working_directory)
+    except (GitSiteError, OSError, SiteLayoutError) as error:
+        audit_logger.event("web", "rollback_failed", website_id=website.id, actor=admin.username)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Unable to revert and publish the requested commit") from error
+    audit_logger.event("web", "rollback_succeeded", website_id=website.id, actor=admin.username, commit=reverted.sha)
+    return JSONResponse({"status": "published", "commit": reverted.sha, "release": release.release_id})
 
 
 @app.get("/health")
@@ -579,6 +591,12 @@ def serialize_job(job: Job) -> dict[str, object]:
         "model": job.model,
         "preview_url": None if job.workspace_directory is None else f"/jobs/{job.id}/preview",
     }
+
+
+def _commit_message(prompt: str) -> str:
+    """Keep Git history useful without placing unbounded prompt content in it."""
+    summary = " ".join(prompt.split())[:72]
+    return f"AI: {summary or 'Website update'}"
 
 
 # This route is deliberately registered last: the public static site is a fallback

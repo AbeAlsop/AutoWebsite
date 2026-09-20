@@ -197,6 +197,22 @@ class RepositoryStore:
             )
         return self._website_from_row(rows[0])
 
+    def configure_active_git_repository(self, github_repo: str, working_directory: Path) -> Website:
+        """Operational setup for the one trusted Git-backed website; never browser input."""
+        remote = github_repo.strip()
+        if not remote:
+            raise RepositoryConfigurationError("A Git repository location is required.")
+        with self._connect() as connection:
+            website_id = self._single_website_id(connection)
+            connection.execute(
+                "UPDATE websites SET github_repo = ?, working_directory = ? WHERE id = ?",
+                (remote, str(working_directory.resolve()), website_id),
+            )
+        website = self.get_active_website()
+        if website is None:
+            raise RepositoryConfigurationError("The configured website could not be read.")
+        return website
+
     def get_admin(self, username: str) -> Admin | None:
         with self._connect() as connection:
             row = connection.execute(

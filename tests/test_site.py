@@ -22,10 +22,10 @@ def test_initializes_source_and_publishes_atomic_release(tmp_path: Path):
     (publisher.source_directory / "index.html").write_text("second release", encoding="utf-8")
     second_release = publisher.publish()
 
-    assert first_release.release_id != second_release.release_id
-    assert publisher.current_release_pointer.is_symlink()
+    assert first_release.release_id == second_release.release_id == "current"
+    assert not publisher.current_release_pointer.is_symlink()
     assert (publisher.current_release_pointer / "index.html").read_text(encoding="utf-8") == "second release"
-    assert (first_release.directory / "index.html").read_text(encoding="utf-8") == "first release"
+    assert not (publisher.published_root / "releases").exists()
 
 
 def test_rejects_source_outside_repository_root(tmp_path: Path):

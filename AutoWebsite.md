@@ -418,23 +418,10 @@ before accepting production traffic.
 
 # Phase 11 – Logging
 
-For the single site, maintain a durable audit trail and logs:
-
-```
-logs/
-
-agent.log
-
-web.log
-
-security.log
-```
-
-Write line-delimited JSON records with an event name, timestamp, website ID, and the
-currently active release ID when available. Rotate each file at a bounded size and keep
-a small fixed number of prior files. Store logs beneath a server-configured,
-permission-restricted `AUTOWEBSITE_LOGS_ROOT` (for the Linux deployment,
-`/srv/autowebsite/state/logs`), not in the application checkout.
+Write concise, one-line records into the normal application/web-server process log,
+which systemd retains with its normal journal policy. Git is the durable record of
+accepted website versions; do not duplicate diffs, agent output, or per-version files
+in a separate application audit archive.
 
 Record
 
@@ -446,20 +433,17 @@ Record
 - rollbacks
 - failures
 
-Include the job ID and active release ID with every agent, validation, publication,
-rollback, and security event. Record the duration of each edit job that users perform.
-Retain enough information to diagnose a failed release
-without recording secrets or uploaded file contents in logs. Enforce this at the log
-writer: reject fields whose names indicate prompts, passwords, tokens, sessions,
-cookies, secrets, paths, filenames, or content. Do not log raw agent output or error
-strings; use stable outcome events and safe IDs/counts instead.
+Record only the action, administrator, bounded one-line prompt summary, job/commit/release
+ID when relevant, and outcome. Never log secrets, session values, upload contents, raw
+agent output, or error details.
 
 ---
 
 # Phase 12 – Git History, Publication, and Rollback
 
-After the Phase 10 checks and administrator approval, serialize this single site's Git
-workflow:
+When a website is configured with its server-side Git location, clone it into the sole
+private staging checkout and publish its initial state. On approval, replace that
+checkout's working tree with the reviewed workspace, then serialize this workflow:
 
 ```
 git add .
@@ -473,10 +457,11 @@ Use a commit message such as:
 AI: Added portfolio gallery
 ```
 
-Give the commit/push operation—not the agent—the minimally scoped Git credential. Each
-commit records the original prompt, job and upload IDs, agent/model version, validation
-outcome, and release ID. The dashboard presents this history with commit hash, date,
-author, message, and publication status.
+Give the commit/push operation—not the agent—the minimally scoped Git credential. Git
+is the only retained version history. Keep only one public `published/current` tree,
+one Git staging checkout, and one disposable active agent workspace locally; delete a
+workspace after approval, rejection, cancellation, or failure. The dashboard presents
+Git history with commit hash, date, and message.
 
 The administrator can select a prior commit to roll back. Create a new rollback commit
 (or a configured revert), build and run the same lightweight validation on its release

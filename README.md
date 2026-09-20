@@ -43,9 +43,11 @@ development machine might use `/Users/you/Sites/active-site` and
 `/Users/you/Sites/published`. Python's `pathlib` handles the host path format; the
 browser never receives or submits either path.
 
-On first startup, AutoWebsite copies the bundled starter site into an empty active-site
-source directory and publishes an initial immutable release. It serves that release at
-`/`; the mutable source checkout and agent workspaces are never publicly served.
+When a Git location is configured, first startup clones that trusted server-side remote
+into the active-site directory and publishes it. Approval copies a reviewed workspace
+into this private Git staging checkout, commits it, and pushes it. Publish then replaces
+the single public `published/current` directory. Git is the version archive; old local
+releases are not retained.
 
 ## Uploads
 
@@ -81,10 +83,9 @@ or administration workflow once that is added.
 ## Agent jobs
 
 The dashboard persists one agent job at a time. Jobs use Codex CLI by default and run
-in a copied workspace under `workspaces/`, so an agent cannot modify the source checkout
-or public release directly. Approval copies a reviewed workspace into the private,
-cumulative `staging/` revision. New jobs start from that staging revision; production
-is still unchanged until the later validation/publishing phases.
+in a copied workspace under `workspaces/`, so an agent cannot modify the Git staging
+checkout or public release directly. Approval commits and pushes the reviewed workspace;
+production is still unchanged until the explicit Publish action.
 
 Agent execution is disabled by default. Enable it only after configuring Codex CLI
 authentication and a pinned model (use a deployment-approved model snapshot when one
@@ -160,7 +161,7 @@ administrator's network.
    sudo -u autowebsite python3 -m venv /srv/autowebsite/app/.venv
    sudo -u autowebsite /srv/autowebsite/app/.venv/bin/pip install -r /srv/autowebsite/app/admin/requirements.txt
    sudo install -d -o autowebsite -g autowebsite -m 0750 \
-     /srv/autowebsite/state/{data,repos,staging,workspaces,published,uploads,logs}
+     /srv/autowebsite/state/{data,repos,workspaces,published,uploads}
    ```
 
 4. **Configure the service.** Copy the supplied example outside the repository, then
@@ -177,6 +178,13 @@ administrator's network.
    ```
 
    Put the generated bcrypt hash and random value in the matching environment entries.
+   Before starting the service, configure Git identity and a least-privilege read/write
+   deploy key (or equivalent credential) for the `autowebsite` account:
+
+   ```bash
+   sudo -u autowebsite -H git config --global user.name "AutoWebsite"
+   sudo -u autowebsite -H git config --global user.email "autowebsite@your-domain.example"
+   ```
    Leave `AUTOWEBSITE_AGENT_ENABLED=false` until the app itself has started cleanly,
    then authenticate Codex **as the `autowebsite` account** (for example, `sudo -u
    autowebsite -H codex login`) using the production account/API credential you intend
@@ -195,12 +203,12 @@ administrator's network.
 
    The service deliberately binds to localhost. Check failures with `sudo journalctl
    -u autowebsite -e` and do not expose port 8000 through the firewall. Now that the
-   service has created `published/releases`, grant Nginx traversal to the release path
+   service has created `published/current`, grant Nginx traversal to the release path
    without making the rest of the state tree listable:
 
    ```bash
    sudo chmod 0711 /srv/autowebsite /srv/autowebsite/state
-   sudo chmod 0755 /srv/autowebsite/state/published /srv/autowebsite/state/published/releases
+   sudo chmod 0755 /srv/autowebsite/state/published /srv/autowebsite/state/published/current
    ```
 
 6. **Configure Nginx and TLS.** Replace `example.com` in the supplied configuration
@@ -237,15 +245,10 @@ workspace-write sandbox and a timeout, but they run as the application service u
 for hostile/untrusted prompting, use a separate container/VM runner with an egress
 allowlist before enabling agent execution on an Internet-facing installation.
 
-## Audit logs
+## Operational log
 
-Set `AUTOWEBSITE_LOGS_ROOT` to a protected server-local directory (the production
-template uses `/srv/autowebsite/state/logs`). AutoWebsite writes rotating JSON-lines
-files there: `web.log` for dashboard, upload, job, publication, and rollback actions;
-`agent.log` for job lifecycle and duration; and `security.log` for authentication and
-rejected security-sensitive operations. Each file rotates at 5 MB and retains five
-older files. Events include safe IDs such as the website, job, upload, and release IDs,
-but intentionally exclude prompts, passwords, sessions, tokens, filenames, upload
-contents, raw agent output, and error details. Use `sudo journalctl -u autowebsite` for
-the service process log and `sudo tail -f /srv/autowebsite/state/logs/web.log` to view
-the audit stream.
+AutoWebsite writes concise action records to Uvicorn's normal access/process log, which
+systemd captures in the service journal. Use `sudo journalctl -u autowebsite` to view
+login, upload, prompt/job, approval, publication, and rollback outcomes. Git is the
+durable edit history; the operational log stores a bounded one-line prompt summary but
+does not retain file copies, diffs, or agent output.

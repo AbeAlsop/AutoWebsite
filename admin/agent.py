@@ -14,7 +14,6 @@ from pathlib import Path
 from .audit import AuditLogger
 from .config import Settings
 from .repository import Job, RepositoryStore, Upload, Website
-from .staging import StagingArea
 
 _IGNORED_NAMES = {".git", ".DS_Store", "__pycache__", ".autowebsite-upload-inputs"}
 _SENSITIVE_NAMES = {".env", ".env.local", ".git", ".ssh"}
@@ -179,14 +178,13 @@ class JobRunner:
         self.settings = settings
         self.audit_logger = audit_logger
         self.agent = CodexAgent(settings)
-        self.staging_area: StagingArea | None = None
+        self.staging_directory: Path | None = None
         self._wake_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     async def start(self, website: Website) -> None:
         self.store.recover_interrupted_jobs(website.id)
-        self.staging_area = StagingArea(website.working_directory, self.settings.staging_root)
-        self.staging_area.initialize()
+        self.staging_directory = website.working_directory
         if self._task is None:
             self._task = asyncio.create_task(self._run(website), name="autowebsite-job-runner")
         self.wake()
@@ -229,17 +227,17 @@ class JobRunner:
         started_at = asyncio.get_running_loop().time()
         self._audit("job_started", job_id=job.id, website_id=website.id, model=job.model or "unknown")
         try:
-            if self.staging_area is None:
+            if self.staging_directory is None:
                 raise RuntimeError("The staging area has not been initialized.")
-            staging = self.staging_area.current_revision()
-            source_directory = job.workspace_directory or staging.directory
+            source_directory = job.workspace_directory or self.staging_directory
             self._prepare_workspace(source_directory, workspace)
             uploads = self.store.get_approved_uploads(website.id, job.upload_ids)
             self._copy_job_uploads(workspace, uploads)
             result = await asyncio.to_thread(self.agent.run, workspace, job.prompt, job.id, uploads)
             current = self.store.get_job(job.id, website.id)
             if current is not None and current.status == "cancel_requested":
-                self.store.complete_job(job.id, status="cancelled", workspace_directory=workspace)
+                self.store.complete_job(job.id, status="cancelled")
+                self._discard_workspace(workspace)
                 self._audit("job_cancelled", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
                 return
             if result.error:
@@ -248,8 +246,8 @@ class JobRunner:
                     status="failed",
                     agent_output=result.output,
                     error=result.error,
-                    workspace_directory=workspace,
                 )
+                self._discard_workspace(workspace)
                 self._audit("job_failed", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
                 return
 
@@ -263,8 +261,8 @@ class JobRunner:
                     error=" ".join(policy_errors),
                     changed_files=changed_files,
                     diff=diff,
-                    workspace_directory=workspace,
                 )
+                self._discard_workspace(workspace)
                 self._audit("job_failed_policy", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at), changed_file_count=len(changed_files))
                 return
             self.store.complete_job(
@@ -275,9 +273,12 @@ class JobRunner:
                 diff=diff,
                 workspace_directory=workspace,
             )
+            if source_directory != self.staging_directory:
+                self._discard_workspace(source_directory)
             self._audit("job_awaiting_review", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at), changed_file_count=len(changed_files))
         except Exception as error:  # Keep worker failures visible in the durable job record.
-            self.store.complete_job(job.id, status="failed", error=str(error), workspace_directory=workspace)
+            self.store.complete_job(job.id, status="failed", error=str(error))
+            self._discard_workspace(workspace)
             self._audit("job_failed_exception", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
 
     def _audit(self, event: str, **fields: object) -> None:
@@ -300,6 +301,20 @@ class JobRunner:
             raise RuntimeError("Refusing to reuse an existing job workspace.")
         workspace.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_root, workspace, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_NAMES))
+
+    def discard_workspace(self, workspace: Path | None) -> None:
+        if workspace is not None:
+            self._discard_workspace(workspace)
+
+    def _discard_workspace(self, workspace: Path) -> None:
+        root = self.settings.workspaces_root.resolve(strict=False)
+        target = workspace.resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
 
     def _copy_job_uploads(self, workspace: Path, uploads: list[Upload]) -> None:
         inputs_root = workspace / ".autowebsite-upload-inputs"

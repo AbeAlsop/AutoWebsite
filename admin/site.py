@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +17,7 @@ _ALLOWED_PUBLIC_SUFFIXES = {
     ".webp", ".woff", ".woff2", ".xml",
 }
 _FORBIDDEN_PUBLIC_NAMES = {".env", ".git", ".ssh", "id_rsa"}
-_IGNORED_RELEASE_NAMES = (".git", ".DS_Store", ".autowebsite-upload-inputs")
+_IGNORED_RELEASE_NAMES = (".git", ".gitignore", ".DS_Store", ".autowebsite-upload-inputs")
 _MAX_PUBLIC_FILE_BYTES = 10 * 1024 * 1024
 
 
@@ -45,10 +44,6 @@ class SingleSitePublisher:
         self.starter_site_directory = starter_site_directory
 
     @property
-    def releases_directory(self) -> Path:
-        return self.published_root / "releases"
-
-    @property
     def current_release_pointer(self) -> Path:
         return self.published_root / "current"
 
@@ -67,10 +62,8 @@ class SingleSitePublisher:
         self._validate_tree(source, source)
 
         current = self.current_release_pointer
-        if current.exists() or current.is_symlink():
-            resolved = current.resolve(strict=True)
-            self._require_within(resolved, self.releases_directory, "current release")
-            return PublishedRelease(resolved.name, resolved)
+        if current.is_dir() and not current.is_symlink():
+            return PublishedRelease("current", current)
         return self.publish()
 
     def publish(self) -> PublishedRelease:
@@ -84,28 +77,21 @@ class SingleSitePublisher:
             raise SiteLayoutError("Cannot publish because the release directory is missing.")
         self._validate_tree(source, source)
 
-        self.releases_directory.mkdir(parents=True, exist_ok=True)
-        release_id = uuid.uuid4().hex
-        release_directory = self.releases_directory / release_id
-        shutil.copytree(source, release_directory, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_RELEASE_NAMES))
-        self._switch_current_release(release_directory)
-        return PublishedRelease(release_id, release_directory)
-
-    def _switch_current_release(self, release_directory: Path) -> None:
-        release = self._require_within(release_directory, self.releases_directory, "release directory")
-        published_root = self.published_root.resolve(strict=True)
-        pointer = published_root / "current"
-        if pointer.exists() and not pointer.is_symlink():
-            raise SiteLayoutError("The current release pointer must be a symlink or absent.")
-
-        temporary_pointer = published_root / f".current-{uuid.uuid4().hex}"
-        relative_target = release.relative_to(published_root)
+        self.published_root.mkdir(parents=True, exist_ok=True)
+        temporary = self.published_root / ".next"
+        previous = self.published_root / ".previous"
+        shutil.rmtree(temporary, ignore_errors=True)
+        shutil.rmtree(previous, ignore_errors=True)
+        shutil.copytree(source, temporary, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_RELEASE_NAMES))
+        current = self.current_release_pointer
         try:
-            os.symlink(relative_target, temporary_pointer, target_is_directory=True)
-            os.replace(temporary_pointer, pointer)
+            if current.exists():
+                os.replace(current, previous)
+            os.replace(temporary, current)
         finally:
-            if temporary_pointer.is_symlink():
-                temporary_pointer.unlink()
+            shutil.rmtree(temporary, ignore_errors=True)
+            shutil.rmtree(previous, ignore_errors=True)
+        return PublishedRelease("current", current)
 
     @staticmethod
     def _require_within(path: Path, root: Path, label: str) -> Path:
@@ -126,7 +112,7 @@ class SingleSitePublisher:
             relative_parts = path.relative_to(directory).parts
             # A Git checkout is never copied into a release; allow its private
             # metadata while validating the publishable working tree.
-            if any(part in {".git", ".autowebsite-upload-inputs"} for part in relative_parts):
+            if any(part in {".git", ".gitignore", ".autowebsite-upload-inputs"} for part in relative_parts):
                 continue
             # macOS Finder metadata is not part of a web release and is already
             # excluded by copytree during publication.
