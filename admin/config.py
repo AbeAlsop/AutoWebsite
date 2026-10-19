@@ -23,6 +23,8 @@ class Settings:
     secure_cookies: bool = os.getenv("AUTOWEBSITE_SECURE_COOKIES", "true").lower() != "false"
     agent_enabled: bool = os.getenv("AUTOWEBSITE_AGENT_ENABLED", "false").lower() == "true"
     agent_command: str = os.getenv("AUTOWEBSITE_AGENT_COMMAND", "codex")
+    agent_sandbox_command: str = os.getenv("AUTOWEBSITE_AGENT_SANDBOX_COMMAND", "/usr/bin/bwrap")
+    agent_auth_file: str = os.getenv("AUTOWEBSITE_AGENT_AUTH_FILE", "")
     agent_model: str = os.getenv("AUTOWEBSITE_AGENT_MODEL", "gpt-5.6-terra")
     agent_timeout_seconds: int = int(os.getenv("AUTOWEBSITE_AGENT_TIMEOUT_SECONDS", "900"))
     max_agent_output_bytes: int = int(os.getenv("AUTOWEBSITE_MAX_AGENT_OUTPUT_BYTES", "1048576"))

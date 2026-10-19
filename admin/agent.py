@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .audit import AuditLogger
+from .agent_sandbox import AgentSandboxError, SANDBOX_ENV, sandbox_command
 from .config import Settings
 from .repository import Job, RepositoryStore, Upload, Website
 
@@ -49,25 +50,27 @@ class CodexAgent:
             return AgentResult("", "Agent execution is disabled. Set AUTOWEBSITE_AGENT_ENABLED=true to run jobs.")
 
         system_prompt = (self.settings.prompts_dir / "system.md").read_text(encoding="utf-8")
-        final_message_path = workspace.parent / f"{job_id}-final.json"
-        command = [
-            self.settings.agent_command,
+        arguments = [
             "exec",
             "--json",
             "--ephemeral",
+            "-c",
+            'cli_auth_credentials_store="file"',
             "--skip-git-repo-check",
             "--sandbox",
             "workspace-write",
             "--model",
             self.settings.agent_model,
             "--output-schema",
-            str(self.settings.prompts_dir / "agent-result-schema.json"),
-            "--output-last-message",
-            str(final_message_path),
+            "/run/agent-result-schema.json",
             "--cd",
-            str(workspace),
+            "/workspace",
             self._build_prompt(system_prompt, prompt, uploads),
         ]
+        try:
+            command = sandbox_command(self.settings, workspace, arguments)
+        except (AgentSandboxError, OSError) as error:
+            return AgentResult("", f"Agent sandbox unavailable: {error}")
         with self._process_lock:
             if job_id in self._cancelled:
                 self._cancelled.discard(job_id)
@@ -79,6 +82,8 @@ class CodexAgent:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=SANDBOX_ENV.copy(),
+                close_fds=True,
                 start_new_session=(os.name == "posix"),
             )
         except FileNotFoundError:
@@ -103,8 +108,6 @@ class CodexAgent:
                 self._cancelled.discard(job_id)
 
         output = self._limit_output(stdout + stderr)
-        if final_message_path.is_file():
-            output = self._limit_output(final_message_path.read_text(encoding="utf-8", errors="replace") + "\n" + output)
         if timeout_error:
             return AgentResult(output, "Agent execution timed out.")
         if process.returncode != 0:

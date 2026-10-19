@@ -97,9 +97,9 @@ export AUTOWEBSITE_AGENT_MODEL="gpt-5.6-terra"
 export AUTOWEBSITE_AGENT_TIMEOUT_SECONDS="900"
 ```
 
-The integration runs `codex exec` with the `workspace-write` sandbox and never passes
-administrator prompts through a shell. Phase 10 adds the required OS/container isolation
-and resource controls for production deployment.
+The integration runs `codex exec` inside a required Linux bubblewrap sandbox,
+with Codex workspace-write restrictions as an additional layer. Administrator
+prompts never pass through a shell. See the isolated runner setup below.
 
 Generate a bcrypt hash without storing the plaintext password:
 
@@ -139,12 +139,14 @@ administrator's network.
 
    ```bash
    sudo apt update
-   sudo apt install -y python3 python3-venv python3-pip git nginx certbot clamav-daemon curl
+   sudo apt install -y python3 python3-venv python3-pip git nginx certbot clamav-daemon curl bubblewrap
    curl -fsSLo /tmp/codex-install.sh https://chatgpt.com/codex/install.sh
    less /tmp/codex-install.sh
    sudo -u autowebsite -H sh /tmp/codex-install.sh
    rm /tmp/codex-install.sh
-   sudo -u autowebsite -H env PATH=/srv/autowebsite/.local/bin:$PATH codex --version
+   # Install the resulting standalone Codex binary under /usr/local/bin.
+   sudo install -m 0755 /srv/autowebsite/.local/bin/codex /usr/local/bin/codex
+   /usr/local/bin/codex --version
    ```
 
    `clamscan` may be used instead of `clamdscan`, but `clamdscan` avoids loading the
@@ -186,9 +188,8 @@ administrator's network.
    sudo -u autowebsite -H git config --global user.email "autowebsite@your-domain.example"
    ```
    Leave `AUTOWEBSITE_AGENT_ENABLED=false` until the app itself has started cleanly,
-   then authenticate Codex **as the `autowebsite` account** (for example, `sudo -u
-   autowebsite -H codex login`) using the production account/API credential you intend
-   to use. Do not store an OpenAI key in the repository or in a public systemd unit.
+   then provision the dedicated agent authentication file described below.
+   Do not store an OpenAI key in the repository or in a public systemd unit.
    Set `AUTOWEBSITE_AGENT_ENABLED=true` only after a controlled test. Set
    `AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND=clamdscan` when using the ClamAV daemon.
 
@@ -240,10 +241,10 @@ administrator's network.
 
 The included [systemd unit](deploy/autowebsite.service), [Nginx configuration](deploy/nginx-autowebsite.conf),
 and [environment template](deploy/autowebsite.env.example) are deployment templates,
-not secrets. Review them before each upgrade. Agent jobs currently use Codex CLI's
-workspace-write sandbox and a timeout, but they run as the application service user;
-for hostile/untrusted prompting, use a separate container/VM runner with an egress
-allowlist before enabling agent execution on an Internet-facing installation.
+not secrets. Review them before each upgrade. Agent jobs require bubblewrap mount
+and process namespaces; the host service home and environment are not exposed.
+Network access remains available for model inference. Deploy an egress allowlist
+or a dedicated VM if your threat model also requires network isolation.
 
 ## Operational log
 
@@ -287,3 +288,34 @@ export AUTOWEBSITE_SESSION_SECRET="$(.venv/bin/python -c 'import secrets; print(
 Persist that value in your protected deployment environment file rather than
 generating a new value on every restart. Rotate any previously used default or
 example secret; rotation invalidates existing session and CSRF tokens.
+
+
+## Isolated agent runner (Linux)
+
+Install `bubblewrap` and a standalone Codex binary in `/usr/local/bin` (or another
+system path under `/usr` or `/bin`). The host must permit unprivileged user
+namespaces. There is no direct-execution fallback on macOS, Windows, or hosts
+where bubblewrap is unavailable or denied; the UI and local unit tests still work.
+
+Provision a **dedicated API-key-based** Codex `auth.json` using file credential
+storage, following [OpenAI authentication documentation](https://developers.openai.com/codex/auth/).
+Copy only that file to `/etc/autowebsite/agent-auth.json`, owned by `autowebsite`
+with mode `0600`, and set `AUTOWEBSITE_AGENT_AUTH_FILE` to it. Do not reuse the
+service environment file or mount an entire home directory. API authentication
+avoids refresh-token writes to the read-only credential mount.
+
+The runner receives only system runtime files, this dedicated inference
+credential, the result schema, and its own writable workspace. It has a private
+HOME, temporary directory, and PID namespace. It receives neither service
+environment variables nor host Git/SSH credentials, databases, or other jobs.
+The service still owns Git approval/push operations. Model API access necessarily
+uses the dedicated runner credential; restrict its permissions and spending.
+
+Before enabling jobs on Linux, run:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_agent_sandbox.py
+```
+
+The real namespace isolation test is skipped on non-Linux hosts or when bubblewrap
+is not installed. Verify it passes on the deployment host before enabling jobs.

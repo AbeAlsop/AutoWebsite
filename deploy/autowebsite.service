@@ -22,8 +22,8 @@ MemoryMax=2G
 CPUQuota=200%
 TasksMax=256
 
-# Do not enable ProtectHome until Codex authentication is stored outside the
-# service account home and AUTOWEBSITE_AGENT_COMMAND is configured accordingly.
+# Codex must be installed in /usr or /bin. Its dedicated authentication file is
+# mounted by bubblewrap; the service home and Git credentials are never mounted.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
