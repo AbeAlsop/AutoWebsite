@@ -252,3 +252,27 @@ systemd captures in the service journal. Use `sudo journalctl -u autowebsite` to
 login, upload, prompt/job, approval, publication, and rollback outcomes. Git is the
 durable edit history; the operational log stores a bounded one-line prompt summary but
 does not retain file copies, diffs, or agent output.
+
+## Local tests
+
+From the repository root, install the development dependencies and run pytest:
+
+```bash
+python3 -m venv .venv  # only needed if the virtual environment does not exist
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+```
+
+Tests use temporary repositories and databases; no production credentials or live
+agent calls are required. Git must be installed for the Git workflow tests.
+
+## Generated-content browser isolation
+
+Draft previews and published pages carry a CSP `sandbox allow-scripts` policy.
+Scripts may render the page, but its opaque origin cannot access admin pages,
+cookies, storage, or service workers. Connections, forms, frames, and embedded
+objects are disabled. This intentionally restricts generated sites that need
+fetch, storage, forms, or embedded content; such features require a separately
+hosted, cookie-isolated public origin before relaxing the policy. Apply the
+updated Nginx configuration as well: it serves published files directly and now
+forwards all administration endpoints. Purge any cached HTML during deployment.

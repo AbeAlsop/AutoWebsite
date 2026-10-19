@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from .audit import AuditLogger
 from .auth import create_session_token, read_session_token, verify_password
 from .config import settings
+from .content_security import GENERATED_CONTENT_CSP, SandboxedStaticFiles
 from .csrf import create_csrf_token, validate_csrf_token
 from .agent import JobRunner
 from .git_site import GitSite, GitSiteError
@@ -480,7 +481,11 @@ def serve_preview_file(directory: Path, asset_path: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
     if not requested.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview asset not found")
-    return FileResponse(requested, headers={"Cache-Control": "no-store"})
+    return FileResponse(requested, headers={
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": GENERATED_CONTENT_CSP,
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.post("/jobs/{job_id}/approve")
@@ -606,4 +611,4 @@ def _commit_message(prompt: str) -> str:
 
 # This route is deliberately registered last: the public static site is a fallback
 # after all administration and health routes, and is served only from `published/current`.
-app.mount("/", StaticFiles(directory=str(settings.public_site_dir), html=True, check_dir=False), name="public")
+app.mount("/", SandboxedStaticFiles(directory=str(settings.public_site_dir), html=True, check_dir=False), name="public")
