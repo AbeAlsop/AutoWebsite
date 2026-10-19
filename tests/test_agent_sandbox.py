@@ -60,7 +60,7 @@ def test_process_receives_only_allowlisted_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("SSH_AUTH_SOCK", "/private/ssh-agent.sock")
     monkeypatch.setattr("admin.agent.sandbox_command", lambda *args: ["/sandbox"])
     process = Mock(returncode=0)
-    process.communicate.return_value = ("done", "")
+    monkeypatch.setattr("admin.agent.collect_output", lambda *args: ("done", None))
     launch = Mock(return_value=process)
     monkeypatch.setattr("admin.agent.subprocess.Popen", launch)
     assert CodexAgent(configured(tmp_path)).run(tmp_path, "test", "test", []).error is None

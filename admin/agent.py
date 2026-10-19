@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import hashlib
 import os
 import signal
 import shutil
@@ -15,11 +14,9 @@ from .audit import AuditLogger
 from .agent_sandbox import AgentSandboxError, SANDBOX_ENV, sandbox_command
 from .config import Settings
 from .repository import Job, RepositoryStore, Upload, Website
+from .resource_limits import IGNORED_NAMES, collect_output, diff_text, file_hash, inventory
 
-_IGNORED_NAMES = {".git", ".DS_Store", "__pycache__", ".autowebsite-upload-inputs"}
-_SENSITIVE_NAMES = {".env", ".env.local", ".git", ".ssh"}
 _MAX_CHANGED_FILES = 50
-_MAX_FILE_BYTES = 5 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -33,7 +30,7 @@ class CodexAgent:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
         self._process_lock = threading.Lock()
 
@@ -48,6 +45,8 @@ class CodexAgent:
     def run(self, workspace: Path, prompt: str, job_id: str, uploads: list[Upload]) -> AgentResult:
         if not self.settings.agent_enabled:
             return AgentResult("", "Agent execution is disabled. Set AUTOWEBSITE_AGENT_ENABLED=true to run jobs.")
+        if self.settings.max_agent_output_bytes <= 0 or self.settings.agent_timeout_seconds <= 0:
+            return AgentResult("", "Agent output limit and timeout must be positive.")
 
         system_prompt = (self.settings.prompts_dir / "system.md").read_text(encoding="utf-8")
         arguments = [
@@ -80,8 +79,7 @@ class CodexAgent:
                 command,
                 cwd=workspace,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                stderr=subprocess.STDOUT,
                 env=SANDBOX_ENV.copy(),
                 close_fds=True,
                 start_new_session=(os.name == "posix"),
@@ -95,28 +93,25 @@ class CodexAgent:
         if cancelled:
             self._terminate_process(process)
 
-        timeout_error = False
         try:
-            stdout, stderr = process.communicate(timeout=self.settings.agent_timeout_seconds)
-        except subprocess.TimeoutExpired:
-            self._terminate_process(process)
-            stdout, stderr = process.communicate()
-            timeout_error = True
+            output, collection_error = collect_output(
+                process, self.settings.max_agent_output_bytes,
+                self.settings.agent_timeout_seconds, self._terminate_process,
+            )
         finally:
             with self._process_lock:
                 self._processes.pop(job_id, None)
                 self._cancelled.discard(job_id)
 
-        output = self._limit_output(stdout + stderr)
-        if timeout_error:
-            return AgentResult(output, "Agent execution timed out.")
+        if collection_error:
+            return AgentResult(output, collection_error)
         if process.returncode != 0:
             return AgentResult(output, f"Codex exited with status {process.returncode}.")
         return AgentResult(output, None)
 
     @staticmethod
-    def _terminate_process(process: subprocess.Popen[str]) -> None:
-        if process.poll() is not None:
+    def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+        if os.name != "posix" and process.poll() is not None:
             return
         try:
             if os.name == "posix":
@@ -165,13 +160,6 @@ administrator request needs it. Do not publish the `.autowebsite-upload-inputs` 
 Return a response that satisfies the supplied JSON schema. The server independently
 calculates the actual changed-file list and diff.
 """
-
-    def _limit_output(self, output: str) -> str:
-        encoded = output.encode("utf-8", errors="replace")
-        if len(encoded) <= self.settings.max_agent_output_bytes:
-            return output
-        return encoded[: self.settings.max_agent_output_bytes].decode("utf-8", errors="ignore") + "\n[output truncated]"
-
 
 class JobRunner:
     """Processes one durable job at a time from the current private staging revision."""
@@ -254,6 +242,10 @@ class JobRunner:
                 self._audit("job_failed", job_id=job.id, website_id=website.id, duration_ms=self._duration_ms(started_at))
                 return
 
+            # Reject file/count/aggregate limits before any diff payload is loaded.
+            policy_errors = self._validate_workspace(workspace, [])
+            if policy_errors:
+                raise RuntimeError(" ".join(policy_errors))
             changed_files, diff = self._diff_directories(source_directory, workspace)
             policy_errors = self._validate_workspace(workspace, changed_files)
             if policy_errors:
@@ -302,8 +294,9 @@ class JobRunner:
             raise RuntimeError("Job workspace is outside the configured workspace root.") from error
         if workspace.exists():
             raise RuntimeError("Refusing to reuse an existing job workspace.")
+        inventory(source_root)
         workspace.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_root, workspace, symlinks=False, ignore=shutil.ignore_patterns(*_IGNORED_NAMES))
+        shutil.copytree(source_root, workspace, symlinks=False, ignore=shutil.ignore_patterns(*IGNORED_NAMES))
 
     def discard_workspace(self, workspace: Path | None) -> None:
         if workspace is not None:
@@ -325,7 +318,7 @@ class JobRunner:
             source = upload.storage_path
             if not source.is_file() or source.is_symlink():
                 raise RuntimeError(f"Approved upload is unavailable: {upload.id}")
-            if upload.checksum is None or hashlib.sha256(source.read_bytes()).hexdigest() != upload.checksum:
+            if upload.checksum is None or file_hash(source) != upload.checksum:
                 raise RuntimeError(f"Approved upload checksum does not match: {upload.id}")
             target = inputs_root / upload.id / "content"
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -335,57 +328,45 @@ class JobRunner:
         before = self._files_by_relative_path(source)
         after = self._files_by_relative_path(workspace)
         changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-        chunks: list[str] = []
+        if len(changed) > _MAX_CHANGED_FILES:
+            raise RuntimeError(f"Agent changed more than {_MAX_CHANGED_FILES} files.")
+        output = bytearray()
+        limit = self.settings.max_agent_output_bytes
         for relative_path in changed:
-            old = before.get(relative_path, b"")
-            new = after.get(relative_path, b"")
-            if self._is_text(old) and self._is_text(new):
-                chunks.extend(
-                    difflib.unified_diff(
-                        old.decode("utf-8", errors="replace").splitlines(keepends=True),
-                        new.decode("utf-8", errors="replace").splitlines(keepends=True),
-                        fromfile=f"source/{relative_path}",
-                        tofile=f"proposed/{relative_path}",
-                    )
+            old = diff_text(source / relative_path) if relative_path in before else b""
+            new = diff_text(workspace / relative_path) if relative_path in after else b""
+            if old is not None and new is not None:
+                lines = difflib.unified_diff(
+                    old.decode("utf-8", errors="replace").splitlines(keepends=True),
+                    new.decode("utf-8", errors="replace").splitlines(keepends=True),
+                    fromfile=f"source/{relative_path}",
+                    tofile=f"proposed/{relative_path}",
                 )
             else:
-                chunks.append(f"Binary file changed: {relative_path}\n")
-        diff = "".join(chunks)
-        if len(diff.encode("utf-8", errors="replace")) > self.settings.max_agent_output_bytes:
-            diff = (
-                diff.encode("utf-8", errors="replace")[: self.settings.max_agent_output_bytes]
-                .decode("utf-8", errors="ignore")
-                + "\n[diff truncated]"
-            )
-        return changed, diff
+                lines = iter([f"Binary or large file changed (diff omitted): {relative_path}\n"])
+            for line in lines:
+                encoded = line.encode("utf-8")
+                remaining = limit - len(output)
+                if len(encoded) > remaining:
+                    marker = b"\n[diff truncated]"
+                    output.extend(encoded[:remaining])
+                    output[max(0, limit - len(marker)):] = marker[:limit]
+                    return changed, output.decode("utf-8", errors="ignore")
+                output.extend(encoded)
+        return changed, output.decode("utf-8", errors="ignore")
 
     @staticmethod
-    def _files_by_relative_path(directory: Path) -> dict[str, bytes]:
-        files: dict[str, bytes] = {}
-        for path in directory.rglob("*"):
-            if any(part in _IGNORED_NAMES for part in path.relative_to(directory).parts):
-                continue
-            if path.is_symlink():
-                raise RuntimeError(f"Symlinks are not permitted in an agent workspace: {path}")
-            if path.is_file():
-                files[path.relative_to(directory).as_posix()] = path.read_bytes()
-        return files
-
-    @staticmethod
-    def _is_text(value: bytes) -> bool:
-        return len(value) <= _MAX_FILE_BYTES and b"\0" not in value
+    def _files_by_relative_path(directory: Path) -> dict[str, str]:
+        files = inventory(directory)
+        return {name: file_hash(path) for name, path in files.items()}
 
     @staticmethod
     def _validate_workspace(workspace: Path, changed_files: list[str]) -> list[str]:
         errors: list[str] = []
         if len(changed_files) > _MAX_CHANGED_FILES:
             errors.append(f"Agent changed more than {_MAX_CHANGED_FILES} files.")
-        for path in workspace.rglob("*"):
-            relative = path.relative_to(workspace)
-            if path.is_symlink():
-                errors.append(f"Symlink is not allowed: {relative.as_posix()}.")
-            if any(part in _SENSITIVE_NAMES for part in relative.parts):
-                errors.append(f"Sensitive path is not allowed: {relative.as_posix()}.")
-            if path.is_file() and path.stat().st_size > _MAX_FILE_BYTES:
-                errors.append(f"File exceeds {_MAX_FILE_BYTES} bytes: {relative.as_posix()}.")
+        try:
+            inventory(workspace, validate_workspace=True)
+        except (OSError, RuntimeError) as error:
+            errors.append(str(error))
         return errors

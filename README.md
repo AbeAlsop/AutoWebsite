@@ -328,3 +328,15 @@ with `Retry-After`; they expire automatically and survive service restarts.
 Successful logins consume a budget too. Password verification runs off the event
 loop with at most two checks at once per worker. Keep Uvicorn bound to localhost
 and trust forwarded client addresses only from your reverse proxy.
+
+## Agent resource limits
+
+Combined stdout/stderr is read incrementally; exceeding
+`AUTOWEBSITE_MAX_AGENT_OUTPUT_BYTES` (default 1 MiB) terminates and fails the job.
+Silent jobs remain subject to the configured timeout. Before copying or diffing,
+workspace trees are limited to 2,000 entries, 100 MiB total, and 5 MiB per file;
+symlinks and special files are rejected. Files are hashed in bounded chunks and
+rechecked when opened. Text files above 256 KiB receive a changed-file notice
+instead of an in-memory line diff; the overall diff has the output byte limit.
+Retain the systemd memory/CPU/task limits and provision filesystem quotas for
+runner disk usage during execution.
