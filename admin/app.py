@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated
 from pathlib import Path
+import sqlite3
+
+from anyio import CapacityLimiter, to_thread
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -9,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .audit import AuditLogger
-from .auth import create_session_token, read_session_token, verify_password
+from .auth import create_session_token, hash_password, read_session_token, verify_password
 from .config import settings
 from .content_security import GENERATED_CONTENT_CSP, SandboxedStaticFiles
 from .csrf import create_csrf_token, validate_csrf_token
@@ -18,6 +21,7 @@ from .git_site import GitSite, GitSiteError
 from .repository import Admin, Job, RepositoryConfigurationError, RepositoryStore, Website
 from .site import SingleSitePublisher, SiteLayoutError
 from .uploads import UploadManager, UploadRejected
+from .login_throttle import LoginRateLimiter
 
 app = FastAPI(title=settings.app_name)
 repository_store = RepositoryStore(settings.database_path)
@@ -26,6 +30,10 @@ job_runner = JobRunner(repository_store, settings, audit_logger)
 upload_manager = UploadManager(repository_store, settings)
 publisher: SingleSitePublisher | None = None
 git_site: GitSite | None = None
+login_limiter = LoginRateLimiter(settings.database_path)
+password_workers = CapacityLimiter(2)
+# Unknown accounts also incur a password check, avoiding a cheap timing oracle.
+dummy_password_hash = hash_password("not-a-real-account-password")
 
 templates = Jinja2Templates(directory=str(settings.templates_dir))
 
@@ -45,6 +53,7 @@ async def initialize_repository_store() -> None:
         bootstrap_working_directory=settings.default_website_directory,
         bootstrap_github_token_ref=settings.default_github_token_ref,
     )
+    login_limiter.initialize()
     website = repository_store.get_active_website()
     if website is None:
         raise RuntimeError("No active website is configured.")
@@ -168,7 +177,21 @@ async def login(
 ) -> Response:
     require_csrf(request, csrf_token)
     admin = repository_store.get_admin(username)
-    if admin is None or not verify_password(password, admin.password_hash):
+    try:
+        retry_after = await to_thread.run_sync(
+            login_limiter.reserve, None if admin is None else admin.username,
+            request.client.host if request.client else "unknown",
+        )
+    except sqlite3.Error as error:
+        raise HTTPException(status_code=503, detail="Login temporarily unavailable") from error
+    if retry_after:
+        raise HTTPException(status_code=429, detail="Too many login attempts",
+                            headers={"Retry-After": str(retry_after)})
+    valid_password = await to_thread.run_sync(
+        verify_password, password, dummy_password_hash if admin is None else admin.password_hash,
+        limiter=password_workers,
+    )
+    if admin is None or not valid_password:
         audit_logger.event("security", "login_failed")
         return render_template_with_csrf(
             request,

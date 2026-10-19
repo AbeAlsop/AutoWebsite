@@ -319,3 +319,12 @@ Before enabling jobs on Linux, run:
 
 The real namespace isolation test is skipped on non-Linux hosts or when bubblewrap
 is not installed. Verify it passes on the deployment host before enabling jobs.
+
+## Login protection
+
+Login attempts have shared SQLite-backed five-minute budgets: 5 per existing
+account, 20 per client IP, and 100 globally. Exhausted budgets return HTTP 429
+with `Retry-After`; they expire automatically and survive service restarts.
+Successful logins consume a budget too. Password verification runs off the event
+loop with at most two checks at once per worker. Keep Uvicorn bound to localhost
+and trust forwarded client addresses only from your reverse proxy.
