@@ -35,6 +35,7 @@ app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="stat
 @app.on_event("startup")
 async def initialize_repository_store() -> None:
     global publisher, git_site
+    settings.validate_security()
     audit_logger.initialize()
     repository_store.initialize(
         bootstrap_username=settings.admin_username,

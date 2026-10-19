@@ -15,7 +15,7 @@ class Settings:
     default_website_name: str = os.getenv("AUTOWEBSITE_DEFAULT_WEBSITE_NAME", "Primary website")
     default_github_repo: str = os.getenv("AUTOWEBSITE_DEFAULT_GITHUB_REPO", "local/website")
     default_github_token_ref: str | None = os.getenv("AUTOWEBSITE_DEFAULT_GITHUB_TOKEN_REF")
-    session_secret: str = os.getenv("AUTOWEBSITE_SESSION_SECRET", "change-this-session-secret")
+    session_secret: str = os.getenv("AUTOWEBSITE_SESSION_SECRET", "")
     session_cookie_name: str = "autowebsite_session"
     session_max_age_seconds: int = 8 * 60 * 60
     csrf_cookie_name: str = "autowebsite_csrf"
@@ -30,6 +30,19 @@ class Settings:
     max_upload_count: int = int(os.getenv("AUTOWEBSITE_MAX_UPLOAD_COUNT", "100"))
     upload_malware_scan_enabled: bool = os.getenv("AUTOWEBSITE_UPLOAD_MALWARE_SCAN_ENABLED", "true").lower() == "true"
     upload_malware_scan_command: str = os.getenv("AUTOWEBSITE_UPLOAD_MALWARE_SCAN_COMMAND", "clamscan")
+
+    def validate_security(self) -> None:
+        secret = self.session_secret.strip()
+        if (
+            len(secret.encode("utf-8")) < 32
+            or secret.lower().startswith(("change-this", "replace-with", "changeme", "example"))
+            or len(set(secret)) < 8
+        ):
+            raise ValueError(
+                "AUTOWEBSITE_SESSION_SECRET must be a random secret of at least 32 bytes, "
+                "not an example value. Generate one with: python -c "
+                "\"import secrets; print(secrets.token_urlsafe(32))\""
+            )
 
     @property
     def templates_dir(self) -> Path:

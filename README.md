@@ -276,3 +276,14 @@ fetch, storage, forms, or embedded content; such features require a separately
 hosted, cookie-isolated public origin before relaxing the policy. Apply the
 updated Nginx configuration as well: it serves published files directly and now
 forwards all administration endpoints. Purge any cached HTML during deployment.
+
+The server refuses to start without a strong `AUTOWEBSITE_SESSION_SECRET`, even
+when agent execution is disabled. Generate one before starting Uvicorn:
+
+```bash
+export AUTOWEBSITE_SESSION_SECRET="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Persist that value in your protected deployment environment file rather than
+generating a new value on every restart. Rotate any previously used default or
+example secret; rotation invalidates existing session and CSRF tokens.
